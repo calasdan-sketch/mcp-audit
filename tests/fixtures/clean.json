@@ -1,0 +1,1 @@
+{"mcpServers":{"filesystem":{"args":["-y","@modelcontextprotocol/server-filesystem@0.2.0"],"command":"npx"},"local-notes":{"args":["/opt/notes/server.js"],"command":"node"},"memory":{"args":["-y","@modelcontextprotocol/server-memory@0.2.0"],"command":"npx"}}}

@@ -1,0 +1,1 @@
+{"assistant":{"version":"2"},"context_servers":{"some-server":{"command":{"args":["-y","some-server"],"env":{},"path":"npx"}}}}
