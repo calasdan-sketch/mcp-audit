@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -61,10 +62,25 @@ def _rpc(proc: subprocess.Popen, method: str, params: dict,
     try:
         proc.stdin.write(json.dumps(req) + "\n")
         proc.stdin.flush()
-        line = proc.stdout.readline()
-        return json.loads(line) if line else None
     except (OSError, ValueError):
         return None
+    # Servers may print log lines or send notifications first: skip anything
+    # that is not the response to this request id. EOF ends the wait; a
+    # server that never answers is killed by probe_server's watchdog.
+    while True:
+        try:
+            line = proc.stdout.readline()
+        except (OSError, ValueError):
+            return None
+        if not line:
+            return None
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("id") == req_id and (
+                "result" in msg or "error" in msg):
+            return msg
 
 
 def _kill_proc_tree(proc: subprocess.Popen) -> None:
@@ -92,11 +108,14 @@ def _kill_proc_tree(proc: subprocess.Popen) -> None:
 def _probe_once(cfg: dict, box: dict) -> dict:
     """Blocking handshake + tools/list. Runs inside the watchdog thread."""
     cmd = [str(cfg.get("command") or "")]
+    # Windows: "npx" is really npx.cmd — resolve via PATH/PATHEXT first.
+    cmd[0] = shutil.which(cmd[0]) or cmd[0]
     cmd += [str(a) for a in (cfg.get("args") or [])]
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            errors="replace", bufsize=1,
             env={**os.environ, **cfg["env"]} if cfg.get("env") else None,
             start_new_session=True,
         )

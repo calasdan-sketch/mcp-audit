@@ -6,16 +6,36 @@ import json
 import os
 import platform
 
+# Set this to a directory to make default discovery look there instead of
+# the real machine: it replaces the home directory and, for the clients that
+# live under %APPDATA%/%LOCALAPPDATA%, <dir>/AppData/Roaming and
+# <dir>/AppData/Local. One variable isolates every default path (the
+# test-suite relies on it; it also lets you audit a copied user profile).
+HOME_ENV = "MCP_AUDIT_HOME"
 
-def _vscode_global_path(home: str) -> str:
-    system = platform.system()
-    if system == "Darwin":
-        return os.path.join(home, "Library", "Application Support",
-                            "Code", "User", "settings.json")
-    if system == "Windows":
-        appdata = os.environ.get("APPDATA", "")
-        return os.path.join(appdata, "Code", "User", "settings.json")
-    return os.path.join(home, ".config", "Code", "User", "settings.json")
+
+def roots() -> dict[str, str]:
+    """The directories every default-discovery path hangs off.
+
+    "home" is what os.path.expanduser("~") gives (HOME on POSIX, USERPROFILE
+    on Windows); "appdata"/"local_appdata" are %APPDATA%/%LOCALAPPDATA%,
+    empty when unset off Windows and defaulting to the conventional folders
+    on Windows. MCP_AUDIT_HOME overrides all three at once. Nothing else in
+    the tool reads HOME, USERPROFILE or APPDATA, so overriding this one
+    function (or setting the variable) is enough to isolate discovery.
+    """
+    override = os.environ.get(HOME_ENV)
+    if override:
+        return {"home": override,
+                "appdata": os.path.join(override, "AppData", "Roaming"),
+                "local_appdata": os.path.join(override, "AppData", "Local")}
+    home = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA", "")
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if platform.system() == "Windows":
+        appdata = appdata or os.path.join(home, "AppData", "Roaming")
+        local_appdata = local_appdata or os.path.join(home, "AppData", "Local")
+    return {"home": home, "appdata": appdata, "local_appdata": local_appdata}
 
 
 def _zed_path(home: str) -> str | None:
@@ -28,14 +48,38 @@ def _zed_path(home: str) -> str | None:
 
 
 def candidate_paths() -> list[tuple[str, str]]:
-    """(client, path) pairs to check, in a stable order."""
-    home = os.path.expanduser("~")
+    """(client, path) pairs to check, in a stable order.
+
+    Claude Code, Cursor and Windsurf live under the home directory on every
+    OS. VS Code's global settings and Claude Desktop's config live under
+    ~/Library/Application Support (macOS), ~/.config (Linux) and %APPDATA%
+    (Windows); the %APPDATA% locations are probed whenever APPDATA is set,
+    which is always on Windows and lets the other OSes exercise them.
+    """
+    r = roots()
+    home, appdata = r["home"], r["appdata"]
     cwd = os.getcwd()
+    system = platform.system()
+    vscode_dirs: list[str] = []
+    desktop_dirs: list[str] = []
+    if system == "Darwin":
+        support = os.path.join(home, "Library", "Application Support")
+        vscode_dirs.append(os.path.join(support, "Code", "User"))
+        desktop_dirs.append(os.path.join(support, "Claude"))
+    elif system != "Windows":
+        vscode_dirs.append(os.path.join(home, ".config", "Code", "User"))
+        desktop_dirs.append(os.path.join(home, ".config", "Claude"))
+    if appdata:
+        vscode_dirs.append(os.path.join(appdata, "Code", "User"))
+        desktop_dirs.append(os.path.join(appdata, "Claude"))
     paths = [
         ("claude-code", os.path.join(home, ".claude.json")),
         ("claude-code-project", os.path.join(cwd, ".mcp.json")),
         ("cursor", os.path.join(home, ".cursor", "mcp.json")),
-        ("vscode", _vscode_global_path(home)),
+    ]
+    paths += [("vscode", os.path.join(d, "settings.json"))
+              for d in vscode_dirs]
+    paths += [
         ("vscode-workspace", os.path.join(cwd, ".vscode", "settings.json")),
         ("windsurf", os.path.join(home, ".codeium", "windsurf",
                                   "mcp_config.json")),
@@ -43,25 +87,8 @@ def candidate_paths() -> list[tuple[str, str]]:
     zed = _zed_path(home)
     if zed:
         paths.append(("zed", zed))
-    system = platform.system()
-    if system == "Darwin":
-        paths.append((
-            "claude-desktop",
-            os.path.join(home, "Library", "Application Support",
-                         "Claude", "claude_desktop_config.json"),
-        ))
-    elif system == "Windows":
-        appdata = os.environ.get("APPDATA", "")
-        paths.append((
-            "claude-desktop",
-            os.path.join(appdata, "Claude", "claude_desktop_config.json"),
-        ))
-    else:
-        paths.append((
-            "claude-desktop",
-            os.path.join(home, ".config", "Claude",
-                         "claude_desktop_config.json"),
-        ))
+    paths += [("claude-desktop", os.path.join(d, "claude_desktop_config.json"))
+              for d in desktop_dirs]
     return paths
 
 
@@ -100,15 +127,31 @@ def _extract_servers(data) -> tuple[dict, str]:
     return {}, "unknown"
 
 
+# Every top-level key some client stores servers under. A known client's
+# config object that has NONE of them simply has no MCP servers configured
+# (Claude Desktop before any server is added — just coworkUserFilesPath and
+# preferences; VS Code settings without an "mcp" block; Claude Code's
+# .claude.json without global servers; Zed without context_servers). That
+# is "0 servers configured", not an unknown shape. The unknown-shape warning
+# is kept for files where one of these keys IS present but has an unexpected
+# shape (e.g. "mcpServers": []): servers may be hiding in there.
+_SERVER_KEYS = ("mcpServers", "servers", "mcp", *_UNSUPPORTED_SHAPES)
+
+
+def _read_json(path: str):
+    # Client configs are UTF-8 (never the console code page, which is what
+    # a bare open() uses on Windows); utf-8-sig also swallows a BOM.
+    with open(path, encoding="utf-8-sig") as f:
+        return json.load(f)
+
+
 def load_config(path: str) -> dict:
     """Return {server_name: server_config} from a client config file.
 
     Unsupported or unrecognized shapes yield {} — use discover() when you
     need to distinguish "no servers configured" from "couldn't parse".
     """
-    with open(path) as f:
-        data = json.load(f)
-    servers, _shape = _extract_servers(data)
+    servers, _shape = _extract_servers(_read_json(path))
     return servers
 
 
@@ -117,10 +160,13 @@ def discover(explicit: list[str] | None = None
     """Return (found, warnings).
 
     found: [{"client", "path", "servers"}] for each config that parsed.
+    A known client's config object with none of the server keys is found
+    with servers == {} ("0 servers configured").
     warnings: [{"client", "path", "reason"}] for files that EXISTED but
     were skipped — unparseable JSON, unreadable, or a top-level shape we
     don't understand (or understand but can't safely audit). A skipped
-    file is never a clean bill of health.
+    file is never a clean bill of health. An explicit path with no server
+    keys stays a warning: the caller asked for that file to be audited.
     """
     found: list[dict] = []
     warnings: list[dict] = []
@@ -133,8 +179,7 @@ def discover(explicit: list[str] | None = None
         if not os.path.isfile(path):
             continue
         try:
-            with open(path) as f:
-                data = json.load(f)
+            data = _read_json(path)
         except json.JSONDecodeError as e:
             warnings.append({"client": client, "path": path,
                              "reason": f"unparseable JSON ({e})"})
@@ -145,10 +190,8 @@ def discover(explicit: list[str] | None = None
             continue
         servers, shape = _extract_servers(data)
         if shape == "unknown":
-            # Zed's settings.json without a context_servers key means no Zed
-            # MCP servers are configured — a known negative, not an unknown
-            # shape.
-            if client == "zed" and "context_servers" not in data:
+            if (client != "explicit" and isinstance(data, dict)
+                    and not any(k in data for k in _SERVER_KEYS)):
                 found.append({"client": client, "path": path, "servers": {}})
                 continue
             warnings.append({

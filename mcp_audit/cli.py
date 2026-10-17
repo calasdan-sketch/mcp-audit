@@ -16,8 +16,11 @@ from . import scoring
 
 
 def _audit_one(name: str, cfg: dict, client: str, path: str,
-               deep: bool, advisories: list[dict]) -> dict:
+               deep: bool, advisories: list[dict],
+               online: bool = False) -> dict:
     findings = detectors.audit_server(name, cfg, advisories)
+    if online:
+        findings.extend(detectors.detect_osv(name, cfg))
     tools: list[dict] = []
     if deep:
         probe = deep_mod.probe_server(cfg)
@@ -40,9 +43,15 @@ def _backup(path: str) -> str:
     return bak
 
 
-def _apply_fix(results: list[dict]) -> list[str]:
-    """Remove servers with critical exfiltration/command findings.
+# Only unambiguous launch-time attacks are fixable. URL/description/advisory
+# findings are report-only: they are too often legitimate config.
+FIXABLE_CHECKS = ("suspicious-command", "pipe-to-shell")
 
+
+def _apply_fix(results: list[dict], remove: bool = False) -> list[str]:
+    """Remove servers with critical suspicious-command/pipe-to-shell findings.
+
+    Without remove=True (--remove) this is a dry run that only reports.
     Backs up each touched config first. Returns human-readable actions."""
     actions: list[str] = []
     # group results by config path
@@ -51,7 +60,7 @@ def _apply_fix(results: list[dict]) -> list[str]:
         by_path.setdefault(r["path"], []).append(r)
 
     for path, group in by_path.items():
-        with open(path) as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
         if "mcpServers" not in data and "servers" not in data:
             # e.g. VS Code's nested {"mcp": {"servers": ...}} shape: we don't
@@ -65,9 +74,12 @@ def _apply_fix(results: list[dict]) -> list[str]:
         for r in group:
             crit = [f for f in r["findings"]
                     if f["severity"] == "critical"
-                    and f["check"] in ("suspicious-command", "pipe-to-shell",
-                                       "exfiltration-endpoint",
-                                       "tool-description-injection")]
+                    and f["check"] in FIXABLE_CHECKS]
+            if crit and r["name"] in servers and not remove:
+                reasons = "; ".join(c["check"] for c in crit)
+                actions.append(f"would remove '{r['name']}' ({reasons}) — "
+                               "re-run with --fix --remove to apply")
+                continue
             if crit and r["name"] in servers:
                 if not changed:
                     bak = _backup(path)
@@ -77,9 +89,25 @@ def _apply_fix(results: list[dict]) -> list[str]:
                 reasons = "; ".join(c["check"] for c in crit)
                 actions.append(f"removed '{r['name']}' ({reasons})")
         if changed:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
     return actions
+
+
+def _harden_streams() -> None:
+    """Never crash on a console that cannot encode a path or server name.
+
+    Python's stderr already replaces unencodable characters; make stdout
+    do the same instead of raising UnicodeEncodeError mid-report.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None or getattr(stream, "errors", None) != "strict":
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (OSError, ValueError):
+            pass
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -98,12 +126,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--deep", action="store_true",
                    help="Also spawn each server and scan live tool "
                         "descriptions (executes server binaries).")
-    p.add_argument("--format", choices=("human", "json"), default="human")
+    p.add_argument("--format", choices=("human", "json", "sarif"),
+                   default="human")
     p.add_argument("--fix", action="store_true",
-                   help="Back up configs and remove servers with critical "
-                        "findings. Regex-only heuristic findings (e.g. "
-                        "base64-looking blobs) are capped at high with a "
-                        "manual-review note and are never auto-removed.")
+                   help="List servers launched via a downloader/shell or "
+                        "curl|sh (critical suspicious-command / pipe-to-shell)"
+                        " that --remove would delete. Dry run on its own.")
+    p.add_argument("--remove", action="store_true",
+                   help="With --fix: actually remove those servers, after "
+                        "backing up each config.")
+    p.add_argument("--online", action="store_true",
+                   help="Also query OSV (api.osv.dev) for pinned npx/uvx "
+                        "packages. Sends package names and versions.")
     p.add_argument("--fail-on", choices=("critical", "high", "medium", "low"),
                    default=None,
                    help="Exit non-zero if any finding at/above this severity.")
@@ -140,7 +174,11 @@ def _explicit_config_error(path: str) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    _harden_streams()
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.remove and not args.fix:
+        parser.error("--remove only works together with --fix")
     if args.config:
         for path in args.config:
             err = _explicit_config_error(path)
@@ -164,10 +202,10 @@ def main(argv: list[str] | None = None) -> int:
     for d in discovered:
         for name, cfg in d["servers"].items():
             results.append(_audit_one(name, cfg, d["client"], d["path"],
-                                      args.deep, advisories))
+                                      args.deep, advisories, args.online))
 
     if args.fix:
-        for a in _apply_fix(results):
+        for a in _apply_fix(results, remove=args.remove):
             sys.stderr.write(f"[mcp-audit] {a}\n")
         # re-audit so the report reflects reality
         discovered, warnings = discovery.discover(args.config)
@@ -175,22 +213,30 @@ def main(argv: list[str] | None = None) -> int:
         for d in discovered:
             for name, cfg in d["servers"].items():
                 results.append(_audit_one(name, cfg, d["client"], d["path"],
-                                          args.deep, advisories))
+                                          args.deep, advisories, args.online))
 
-    if args.format == "json":
+    if args.format == "sarif":
+        print(json.dumps(scoring.render_sarif(results, __version__), indent=2))
+    elif args.format == "json":
         out = {"results": [{k: r[k] for k in
                             ("name", "client", "path", "findings",
                              "score", "grade")} for r in results],
                "summary": scoring.summarize(results),
                "warnings": warnings}
         print(json.dumps(out, indent=2))
+    if args.format != "human":
+        if args.format == "sarif":
+            for w in warnings:  # JSON carries these inline; SARIF can't
+                sys.stderr.write(f"[mcp-audit] warning: skipped {w['path']} "
+                                 f"<{w['client']}>: {w['reason']}\n")
         if not discovered:
             sys.stderr.write(
                 "[mcp-audit] warning: no MCP configs discovered — this is "
                 "not a clean bill of health\n")
     else:
         print(scoring.render_human(results, warnings=warnings,
-                                   n_configs=len(discovered)))
+                                   n_configs=len(discovered),
+                                   configs=discovered))
         if args.deep:
             sys.stderr.write(
                 "[mcp-audit] --deep executes server binaries; only probe "
