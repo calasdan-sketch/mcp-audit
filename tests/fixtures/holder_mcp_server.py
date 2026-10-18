@@ -7,7 +7,7 @@ It starts a grandchild in a NEW session (so a process-group kill cannot reach
 it) that inherits this server's stdout and writes its pid to PIDFILE. With
 "answer" the server then speaks MCP like fake_mcp_server; without it the
 server never answers. The grandchild sleeps for 30 seconds, then exits (the
-tests kill it earlier).
+tests kill it earlier). The server's own pid is written to PIDFILE.server.
 """
 
 import os
@@ -25,6 +25,8 @@ GRANDCHILD = (
 
 def main() -> None:
     pidfile = sys.argv[1]
+    with open(pidfile + ".server", "w") as f:
+        f.write(str(os.getpid()))
     subprocess.Popen([sys.executable, "-c", GRANDCHILD, pidfile],
                      start_new_session=True)
     deadline = time.time() + 10

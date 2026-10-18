@@ -2,8 +2,8 @@
 """Fake MCP server whose tool description carries ONLY a base64-looking
 blob (a documented example key format) — no injection phrasing.
 
-The scanner must flag the blob as a high-severity heuristic with a manual
-review note, and --fix must NOT auto-remove this server.
+The scanner must flag the blob as a medium-severity heuristic (encoded
+text) with a manual review note, and --fix must NOT auto-remove this server.
 """
 
 import json

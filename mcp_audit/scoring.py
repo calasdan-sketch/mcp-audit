@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import sys
 
-from . import redact
+from . import discovery, redact
 
 DEDUCTIONS = {"critical": 40, "high": 20, "medium": 10, "low": 5}
+
+#: The check id of every finding about what a server says of its tools (the
+#: --deep description scan); a report that has none of them for a server whose
+#: tools were read says so in its own words (see _deep_line).
+DESCRIPTION_CHECK = "tool-description-injection"
 
 # Report glyphs and their ASCII stand-ins. A Windows console or pipe often
 # runs cp1252, which cannot encode the check mark or the box-drawing rule:
@@ -57,6 +62,21 @@ def summarize(results: list[dict]) -> dict:
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def _deep_line(r: dict) -> "str | None":
+    """What the report says of a server whose tools --deep read when what
+    they say raised nothing. Not "no findings": that would speak for the
+    whole server, and the scanner only knows some patterns."""
+    read = r.get("deep_read")
+    if read is None or any(f["check"] == DESCRIPTION_CHECK
+                           for f in r["findings"]):
+        return None
+    if not read:
+        return "deep: the server lists no tools, so there was nothing to read"
+    return (f"deep: {read} tool{'' if read == 1 else 's'} read, no known "
+            "poisoning patterns matched (heuristic - this is not proof of "
+            "safety)")
+
+
 def render_human(results: list[dict], warnings: list[dict] | None = None,
                  n_configs: int = 0, configs: list[dict] | None = None) -> str:
     """Render the human report.
@@ -68,7 +88,9 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
     holds no servers gets an info line ("0 servers configured") so a known
     client with nothing installed reads as exactly that, not as skipped.
     When zero configs were discovered the report says so plainly — a
-    confident "no findings" is never emitted for unscanned configs.
+    confident "no findings" is never emitted for unscanned configs. Nor is it
+    for a server whose tools --deep read: that line says what was read and
+    that the scan is a heuristic.
 
     Names, paths and messages come from the configs being audited. Each is
     sanitized where it is placed in the report: a control or bidi character
@@ -83,8 +105,20 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
     for w in warnings:
         lines.append(f"  [!] skipped {s(w['path'])} <{s(w['client'])}>: "
                      f"{s(w['reason'])}")
+    managed: set = set()
     for c in configs or []:
-        if not c.get("servers"):
+        if discovery.is_managed_client(c["client"]):
+            # one line per file, whatever it holds: the organization's servers
+            # are not the ones this person wrote
+            if c["path"] not in managed:
+                managed.add(c["path"])
+                count = sum(len(g.get("servers") or {}) for g in configs
+                            if g["path"] == c["path"])
+                lines.append(
+                    f"  [i] managed config present: {s(c['path'])} "
+                    f"<{s(c['client'])}> - set by your organization, "
+                    f"{count} server(s); --fix never rewrites it")
+        elif not c.get("servers"):
             lines.append(f"  [i] {s(c['path'])} <{s(c['client'])}>: "
                          "0 servers configured")
     if not results:
@@ -101,13 +135,15 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
                      f"<{s(r['client'])}>")
         lines.append(f"        {s(r['path'])}" + (
             f"  (project: {s(r['project'])})" if "project" in r else ""))
-        if not r["findings"]:
-            lines.append(f"        {sym('✓')} no findings")
-            continue
         for f in sorted(r["findings"],
                         key=lambda x: _SEV_ORDER.get(x["severity"], 9)):
             lines.append(f"        [{f['severity'].upper():8}] "
                          f"{s(f['message'])}")
+        deep = _deep_line(r)
+        if deep:
+            lines.append(f"        {deep}")
+        elif not r["findings"]:
+            lines.append(f"        {sym('✓')} no findings")
     s = summarize(results)
     lines += ["",
               f"  {s['servers']} servers {sym('·')} {s['findings']} findings "

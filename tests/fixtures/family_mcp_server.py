@@ -5,7 +5,8 @@ case: npx starting node). The child writes its pid to PIDFILE and sleeps.
 usage: family_mcp_server.py PIDFILE [silent]
 
 With "silent" the server never answers (to prove the tree is also killed at
-the deadline); otherwise it speaks MCP like fake_mcp_server.
+the deadline); otherwise it speaks MCP like fake_mcp_server. The server's own
+pid is written to PIDFILE.server.
 """
 
 import os
@@ -22,6 +23,8 @@ CHILD = (
 
 def main() -> None:
     pidfile = sys.argv[1]
+    with open(pidfile + ".server", "w") as f:
+        f.write(str(os.getpid()))
     subprocess.Popen([sys.executable, "-c", CHILD, pidfile],
                      stdout=subprocess.DEVNULL)
     deadline = time.time() + 10

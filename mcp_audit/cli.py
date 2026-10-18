@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import sys
 import tempfile
@@ -17,16 +18,18 @@ from . import __version__
 from . import deep as deep_mod
 from . import detectors
 from . import discovery
+from . import launch
 from . import redact
 from . import scoring
 
 
 def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
-               online: bool = False) -> dict:
+               online: bool = False, allow_hosts=()) -> dict:
     """Statically audit one server entry of a discovered group (see
-    discovery). Nothing is launched here: that is the --deep step."""
+    discovery). Nothing is launched here: that is the --deep step.
+    `allow_hosts`: --allow-host, as detectors.host_pattern() writes them."""
     client, path = group["client"], group["path"]
-    findings = detectors.audit_server(name, cfg, advisories)
+    findings = detectors.audit_server(name, cfg, advisories, allow_hosts)
     if online:
         findings.extend(detectors.detect_osv(name, cfg))
     tools: list[dict] = []
@@ -43,8 +46,8 @@ def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
 
 
 def _audit_all(discovered: list[dict], advisories: list[dict],
-               online: bool) -> list[dict]:
-    return [_audit_one(name, cfg, d, advisories, online)
+               online: bool, allow_hosts=()) -> list[dict]:
+    return [_audit_one(name, cfg, d, advisories, online, allow_hosts)
             for d in discovered for name, cfg in d["servers"].items()]
 
 
@@ -116,7 +119,11 @@ def _deep_pass(results: list[dict], probe_critical: bool,
     (whoever wrote the project chose their commands: think of a repository
     you have just cloned) unless `probe_project` is set. A server that is
     left alone, or cannot be probed, gets a low `deep-probe` finding: --deep
-    never reports a server as read when it was not."""
+    never reports a server as read when it was not.
+
+    A signal that ends mcp-audit while a server runs (Ctrl-C, SIGTERM,
+    SIGHUP) stops the server first and ends the run: deep_mod.Interrupted
+    comes out of here and main() answers it. There is no report then."""
     holds = {id(r): _hold_reasons(r, probe_critical, probe_project)
              for r in results}
     held_back = {i for i, reasons in holds.items() if reasons}
@@ -127,34 +134,38 @@ def _deep_pass(results: list[dict], probe_critical: bool,
         _note(f"--deep will now LAUNCH {len(launching)} MCP server(s) on this "
               "machine, with your user rights, and talk to them over stdio. "
               "A server can do anything you can: only go on if you would "
-              "run these yourself.")
+              "run these yourself. Arguments are counted, not printed (any "
+              "of them can be a credential): read them in the config file "
+              "named on each line.")
         for r in results:
             if id(r) in launching:
-                _note(f"  '{r['name']}' <{r['client']}> from {r['path']}: "
-                      f"{redact.command_line(r['config'])}")
+                _note(f"  '{r['name']}' <{r['client']}> from {r['path']}, "
+                      f"runs: {launch.summary(r['config'])}")
     for r in results:
         if id(r) in held_back:
             _note(f"--deep leaves '{r['name']}' <{r['client']}> from "
                   f"{r['path']} alone: {_held_text(holds[id(r)])}")
     sys.stderr.flush()
-    for r in results:
-        if id(r) in held_back:
-            _add_findings(r, [{
-                "severity": "low", "check": "deep-probe",
-                "message": "--deep did not launch this server: "
-                           + _held_text(holds[id(r)])}])
-            continue
-        if id(r) in launching:
-            _note(f"probing '{r['name']}'...")
-        probe = deep_mod.probe_server(r["config"])
-        new: list[dict] = []
-        if probe["ok"]:
-            r["tools"] = probe["tools"]
-            new += deep_mod.audit_descriptions(probe["tools"])
-        if probe.get("error"):
-            new.append({"severity": "low", "check": "deep-probe",
-                        "message": f"--deep probe: {probe['error']}"})
-        _add_findings(r, new)
+    with deep_mod.stop_on_signals():
+        for r in results:
+            if id(r) in held_back:
+                _add_findings(r, [{
+                    "severity": "low", "check": "deep-probe",
+                    "message": "--deep did not launch this server: "
+                               + _held_text(holds[id(r)])}])
+                continue
+            if id(r) in launching:
+                _note(f"probing '{r['name']}'...")
+            probe = deep_mod.probe_server(r["config"])
+            new: list[dict] = []
+            if probe["ok"]:
+                r["tools"] = probe["tools"]
+                r["deep_read"] = len(probe["tools"])
+                new += deep_mod.audit_descriptions(probe["tools"])
+            if probe.get("error"):
+                new.append({"severity": "low", "check": "deep-probe",
+                            "message": f"--deep probe: {probe['error']}"})
+            _add_findings(r, new)
 
 
 # Only unambiguous launch-time attacks are fixable. URL/description/advisory
@@ -201,6 +212,14 @@ def _plan_fix(results: list[dict]) -> "tuple[list[dict], list[str]]":
                 and f["check"] in FIXABLE_CHECKS]
         if not crit:
             continue
+        if discovery.is_managed_client(r["client"]):
+            # the organization's file, not this person's: not ours to edit
+            if r["path"] not in skipped:
+                skipped.add(r["path"])
+                notes.append(f"skipped {r['path']}: it is your organization's "
+                             "managed configuration, which --fix never "
+                             "rewrites; ask whoever manages it")
+            continue
         if not _fixable_shape(r):
             # e.g. VS Code's nested {"mcp": {"servers": ...}} shape: we don't
             # rewrite layouts we don't fully own. Report-only, never silent.
@@ -214,7 +233,7 @@ def _plan_fix(results: list[dict]) -> "tuple[list[dict], list[str]]":
             "key_path": r["key_path"], "config": r["config"],
             "where": _where(r),
             "reasons": "; ".join(dict.fromkeys(f["check"] for f in crit)),
-            "runs": redact.command_line(r["config"]),
+            "runs": launch.summary(r["config"]),
         })
     return items, notes
 
@@ -437,6 +456,15 @@ def _harden_streams() -> None:
             pass
 
 
+def _host_arg(text: str) -> str:
+    """An --allow-host value. The error does not repeat it: it may be a URL
+    with a credential in it."""
+    try:
+        return detectors.host_pattern(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mcp-audit",
@@ -446,17 +474,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", action="append", default=None,
                    help="Explicit config file to audit (repeatable). "
                         "Default: auto-discover Claude Code (+project "
-                        ".mcp.json), Claude Desktop, Cursor, VS Code, "
+                        ".mcp.json, and the organization's "
+                        "managed-mcp.json), Claude Desktop, Cursor, VS Code, "
                         "Windsurf, Zed.")
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     p.add_argument("--deep", action="store_true",
-                   help="Also launch each stdio server and scan its live tool "
-                        "descriptions. This EXECUTES the servers: it lists "
+                   help="Also launch each stdio server and scan what it says "
+                        "about its tools (descriptions, titles, parameter "
+                        "descriptions) for prompt injection - a heuristic: a "
+                        "clean scan is not proof of safety. This EXECUTES the "
+                        "servers: it lists "
                         "them first, and skips the ones with critical "
                         "findings unless --probe-critical is given, and the "
                         "ones from project config files in the current "
-                        "directory unless --probe-project is given.")
+                        "directory unless --probe-project is given. A signal "
+                        "that ends mcp-audit meanwhile (Ctrl-C, SIGTERM, "
+                        "SIGHUP) stops the servers first and exits 128 plus "
+                        "its number, with no report.")
     p.add_argument("--probe-critical", action="store_true",
                    help="With --deep: also launch servers that have critical "
                         "findings (skipped by default: launching one runs "
@@ -469,6 +504,20 @@ def _build_parser() -> argparse.ArgumentParser:
                         "wrote the project, say a repository you have just "
                         "cloned, chose the commands. Servers from your home "
                         "directory and from a --config you name are launched.")
+    p.add_argument("--allow-host", action="append", default=[],
+                   type=_host_arg, metavar="HOST",
+                   help="Trust HOST (repeatable): a remote MCP server, a "
+                        "package registry or an endpoint at HOST is not "
+                        "reported when it is reached over https or wss, and "
+                        "a package from a git repository there is judged by "
+                        "its pin (git-source) instead of as an unknown "
+                        "endpoint. HOST is a name (mcp.example.com), "
+                        "*.example.com for every host below a name, or an "
+                        "IPv4 address - not a URL, a port or a wildcard over "
+                        "a whole top-level domain. Plain http is still "
+                        "reported. There is no config file: give it on every "
+                        "run. Without it only the hosts built in are "
+                        "trusted (the README lists them).")
     p.add_argument("--format", choices=("human", "json", "sarif"),
                    default="human")
     p.add_argument("--fix", action="store_true",
@@ -649,6 +698,28 @@ def _crash(exc: Exception) -> int:
     return 2
 
 
+def _interrupted(signum: int, servers: bool = False) -> int:
+    """The run was cut short by a signal. There is no verdict, so there is no
+    report: a note on stderr says so, and the exit code is the one a shell
+    reports for a process that the signal ended, 128 plus its number (Ctrl-C
+    is 130). `servers`: --deep had servers running, and they were stopped."""
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = f"signal {signum}"
+    text = f"interrupted by {name}; no report was produced"
+    if servers:
+        text += "; the servers --deep had started were stopped"
+    try:
+        _note(text)
+    except (OSError, ValueError):
+        # The terminal is gone (that is what SIGHUP says): nobody is left to
+        # tell, and what is still buffered must not fail again at exit and
+        # change the code.
+        _discard_output(sys.stderr)
+    return 128 + signum
+
+
 def main(argv: list[str] | None = None) -> int:
     _harden_streams()
     # `mcp-audit | head -1` must neither traceback nor change the exit code
@@ -656,7 +727,11 @@ def main(argv: list[str] | None = None) -> int:
     with _closed_pipe_tolerant():
         try:
             return _main(argv)
-        except Exception as e:  # SystemExit and Ctrl-C are not Exceptions
+        except deep_mod.Interrupted as e:   # --deep, from its handlers
+            return _interrupted(e.signum, servers=True)
+        except KeyboardInterrupt:           # Ctrl-C anywhere else
+            return _interrupted(signal.SIGINT)
+        except Exception as e:  # SystemExit is not an Exception
             return _crash(e)
 
 
@@ -692,7 +767,8 @@ def _main(argv: list[str] | None) -> int:
                   f"{w['reason']}")
         return 2
 
-    results = _audit_all(discovered, advisories, args.online)
+    allow_hosts = tuple(dict.fromkeys(args.allow_host))
+    results = _audit_all(discovered, advisories, args.online, allow_hosts)
 
     fix_failed = False
     if args.fix:
@@ -701,7 +777,7 @@ def _main(argv: list[str] | None) -> int:
             return stop
         # re-audit so the report reflects reality
         discovered, warnings = discovery.discover(args.config)
-        results = _audit_all(discovered, advisories, args.online)
+        results = _audit_all(discovered, advisories, args.online, allow_hosts)
 
     if args.deep:  # after --fix: once, and never a server --fix just removed
         _deep_pass(results, args.probe_critical, args.probe_project)

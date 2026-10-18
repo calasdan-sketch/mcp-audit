@@ -6,12 +6,11 @@ import ipaddress
 import json
 import ntpath
 import re
-import urllib.parse
 import urllib.request
 from importlib import resources
 from typing import NamedTuple
 
-from . import redact
+from . import redact, urls
 
 #: The advisory feed, shipped as package data next to this module.
 FEED_NAME = "advisories.json"
@@ -20,7 +19,15 @@ FEED_NAME = "advisories.json"
 #             "check": str, "message": str}
 SEVERITIES = ("critical", "high", "medium", "low")
 
-URL_RE = re.compile(r"(?:https?|wss?)://[^\s'\"<>]+", re.IGNORECASE)
+# A URL as a WHATWG parser (Node's `new URL`, a browser) reads it: after the
+# scheme, any run of slashes and backslashes leads to the host
+# (`http:\\evil.example`, `http:/evil.example`). It ends at white space or a
+# quote, as it does in a shell script; _values() covers a URL that is a whole
+# argument and so may hold both.
+URL_RE = re.compile(r"(?:https?|wss?):[/\\]+[^\s'\"<>/\\][^\s'\"<>]*",
+                    re.IGNORECASE)
+_START_RE = re.compile(r"(?:https?|wss?):[/\\]+", re.IGNORECASE)
+_MAX_JSON_ARG = 1_000_000
 # Bare IPv4:port callbacks ("203.0.113.9:4444") not already part of a URL.
 IP_PORT_RE = re.compile(r"(?<![\w./:])(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})\b")
 # Well-known vendor API hosts that official MCP servers are configured with
@@ -37,6 +44,30 @@ ALLOWED_API_HOSTS = (
     "api.linear.app",
     "api.stripe.com",
 )
+#: Hosts of git forges. A package a runner installs from a repository there is
+#: judged by its pin (`git-source`), not as a remote endpoint. `--allow-host`
+#: adds a forge of your own.
+GIT_FORGES = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org")
+#: The default package registries: a runner pointed at one is not reported.
+DEFAULT_REGISTRIES = ("registry.npmjs.org", "registry.yarnpkg.com",
+                      "pypi.org", "pypi.python.org", "files.pythonhosted.org")
+#: Programs that connect a client to a remote MCP server whose URL they are
+#: given; that URL is a remote server, as a `url` entry is.
+BRIDGES = frozenset({"mcp-remote", "mcp-proxy", "supergateway"})
+_BRIDGE_URL_OPTS = frozenset({"--sse", "--streamablehttp", "--url",
+                              "--remote"})
+#: Environment variables that point a package manager at a registry.
+_REGISTRY_ENV = frozenset({
+    "npm_config_registry", "yarn_npm_registry_server", "uv_index_url",
+    "uv_default_index", "uv_extra_index_url", "pip_index_url",
+    "pip_extra_index_url"})
+#: Addresses that are a service on the local network, not a callback to
+#: someone else: RFC 1918 and link-local. (Python's is_private also takes the
+#: documentation ranges, which are exactly what an example callback uses.)
+_LAN = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"))
+_LABEL = r"[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?"
+_HOST_PATTERN_RE = re.compile(r"%s(?:\.%s)*" % (_LABEL, _LABEL))
 #: Shells that run a command string (`sh -c`, `cmd /c`, `powershell -Command`).
 SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh",
                     "tcsh"})
@@ -70,50 +101,194 @@ def _cmd_name(cfg: dict) -> str:
 
 
 def _is_local(host: str) -> bool:
-    host = (host or "").strip("[]").lower()
+    """The local machine: `localhost`, or a loopback or unspecified address
+    (an IPv4-mapped IPv6 address counts as the IPv4 address in it, on every
+    Python version). `host` is lower-case, without brackets or a trailing
+    dot, as in urls.Reading.host."""
+    host = (host or "").lower()
     if host == "localhost":
         return True
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return ip.is_loopback or ip.is_unspecified
 
 
-def _is_allowed_api(parts: urllib.parse.SplitResult) -> bool:
-    host = (parts.hostname or "").lower()
-    if parts.scheme.lower() not in ("https", "wss") or not host:
-        return False
+def host_pattern(text: str) -> str:
+    """A host for --allow-host in the form the allowlist uses: a lower-case
+    name, or `.suffix` for any host below a name (`*.corp.example`). Raises
+    ValueError, with the reason, for anything else: a URL, a port, a path, a
+    pattern with a wildcard anywhere but in front, a name that is not ASCII,
+    or `*.com` (a whole top-level domain)."""
+    raw = text.strip().lower()
+    wildcard = raw.startswith(("*.", "."))
+    name = raw[2:] if raw.startswith("*.") else raw[1:] if wildcard else raw
+    name = name[:-1] if name.endswith(".") else name
+    if not name.isascii():
+        raise ValueError("write an international host name in its ASCII "
+                         "(punycode, xn--) form")
+    if len(name) > 253 or not _HOST_PATTERN_RE.fullmatch(name):
+        raise ValueError("expected a host name such as api.example.com or "
+                         "*.example.com - not a URL, a port or another "
+                         "kind of pattern")
+    if wildcard and "." not in name:
+        raise ValueError("a wildcard over a whole top-level domain would "
+                         "trust every host under it")
+    return ("." if wildcard else "") + name
+
+
+def _listed(host: str, patterns) -> bool:
+    """`host` is one of `patterns`: a name, or `.suffix` for any subdomain."""
     return any(host.endswith(h) if h.startswith(".") else host == h
-               for h in ALLOWED_API_HOSTS)
+               for h in patterns)
 
 
-def _endpoints(text: str) -> list[tuple[str, str]]:
+def _is_allowed_api(scheme: str, host: str) -> bool:
+    if scheme not in ("https", "wss") or not host:
+        return False
+    return _listed(host, ALLOWED_API_HOSTS)
+
+
+def _is_lan(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.version == 4 and any(ip in net for net in _LAN)
+
+
+def _trusted(scheme: str, host: str, allow) -> bool:
+    """`host` is one the user named with --allow-host (https and wss only:
+    anything else can be read or changed on the way)."""
+    return scheme in ("https", "wss") and _listed(host, allow)
+
+
+def _quiet(scheme: str, reading: urls.Reading, local_only: bool = False,
+           allow=()) -> bool:
+    """True when this reading of a URL's host is the local machine, a host
+    the user trusts or (unless local_only) a trusted API host. A host the
+    text does not pin down (a percent escape, a non-ASCII name) is never
+    quiet."""
+    if not reading.exact:
+        return False
+    return (_is_local(reading.host) or _trusted(scheme, reading.host, allow)
+            or (not local_only and _is_allowed_api(scheme, reading.host)))
+
+
+def _shown(parsed: urls.Url, loud: "list[urls.Reading]") -> str:
+    """The URL as it is printed: scheme://host[:port], then "/..." if a path,
+    query or fragment followed - never the userinfo. When parsers disagree
+    about a URL, the host one of them reads may be the start of its userinfo,
+    so a host that is not plainly a name or an address is not printed."""
+    pick = next((r for r in loud
+                 if not parsed.ambiguous or urls.looks_like_host(r)), None)
+    if pick is None:
+        return f"{parsed.scheme}://<host>/..."
+    return f"{parsed.scheme}://{pick.shown}{pick.tail}"
+
+
+def _judge(url: str, whole: bool = False, allow=()
+           ) -> "list[tuple[str, str]]":
+    """What is wrong with one URL found in text, as (kind, endpoint) pairs:
+    nothing when every host a parser could read it as is local or trusted,
+    ("unparseable", "") when it cannot be taken apart, else ("url", printable
+    form) for the reading that is not quiet, plus ("ambiguous", "") when the
+    parsers disagree about the host. `whole`: the text is a whole argument,
+    which may be prose that starts with `https://`: no host is no URL."""
+    try:
+        parsed = urls.parse(url)
+    except urls.NoHost:
+        return [] if whole else [("unparseable", "")]
+    except urls.UnparseableUrl:
+        return [("unparseable", "")]
+    if not parsed.readings:
+        return [("unparseable", "")]
+    loud = [r for r in parsed.readings
+            if not _quiet(parsed.scheme, r, allow=allow)]
+    if not loud:
+        return []
+    found = [("url", _shown(parsed, loud))]
+    if parsed.ambiguous:
+        found.append(("ambiguous", ""))
+    return found
+
+
+def _endpoints(text: str, allow=()) -> list[tuple[str, str]]:
     """Remote, non-allowlisted endpoints (URLs and bare IP:port) in text, as
-    (kind, endpoint). kind is "url", "hostport" (a bare IP:port, which has no
-    userinfo or path to hide anything in) or "unparseable" for a URL that
-    could not be taken apart: URLs are handled one at a time, so one
-    malformed URL can neither hide another one nor take the whole detector
-    down."""
-    out = []
-    for m in URL_RE.finditer(text):
-        url = m.group(0).rstrip(".,;)")
-        try:
-            parts = urllib.parse.urlsplit(url)
-            remote = (not _is_local(parts.hostname or "")
-                      and not _is_allowed_api(parts))
-        except ValueError:
-            out.append(("unparseable", url))
-            continue
-        if remote:
-            out.append(("url", url))
+    (kind, endpoint). kind is "url" (endpoint: its printable form), "hostport"
+    (a bare IP:port, which has no userinfo or path to hide anything in),
+    "unparseable" for a URL that could not be taken apart, or "ambiguous"
+    (right after its "url") for a URL whose host depends on the parser. URLs
+    are handled one at a time, so one malformed URL can neither hide another
+    one nor take the whole detector down.
+
+    A WHATWG parser deletes tabs and line breaks from anywhere in a URL, so
+    a text that has any is read a second time without them
+    (`ht<TAB>tps://evil.example`, `http://localhost<TAB>.evil.example`)."""
+    out: list[tuple[str, str]] = []
+    squashed = text.translate(urls.DROPPED)
+    for t in (text,) if squashed == text else (text, squashed):
+        before = set(out)
+        for m in URL_RE.finditer(t):
+            group = _judge(m.group(0).rstrip(".,;)"), allow=allow)
+            if group and (t is text or group[0] not in before):
+                out.extend(group)
+    # The text may itself be a URL, and a program parses that whole: a space
+    # or a quote before an "@" is userinfo to it, but ends the word above
+    # (`https://localhost y@evil.example`). Only what is new is added.
+    seen = set(out)
+    for value in _values(text):
+        group = _judge(value, whole=True, allow=allow)
+        if group and group[0] not in seen:
+            out.extend(group)
+            seen.add(group[0])
     for m in IP_PORT_RE.finditer(text):
         try:
             ipaddress.ip_address(m.group(1))
         except ValueError:
             continue  # not an IP (e.g. a version string)
-        if not _is_local(m.group(1)):
+        if not (_is_local(m.group(1)) or _is_lan(m.group(1))
+                or _listed(m.group(1), allow)):
             out.append(("hostport", m.group(0)))
+    return out
+
+
+def _json_strings(text: str) -> "list[str]":
+    """Every string in `text` when it is a JSON object or array (a program
+    gets a URL out of `--config '{"url": ...}'`), else nothing."""
+    s = text.strip()
+    if s[:1] not in ("{", "[") or len(s) > _MAX_JSON_ARG:
+        return []
+    try:
+        doc = json.loads(s)
+    except (ValueError, RecursionError):
+        return []
+    out: list[str] = []
+    stack = [doc]
+    while stack and len(out) < 1000:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return out
+
+
+def _values(text: str) -> "list[str]":
+    """The strings in `text` that a program would parse whole as a URL: the
+    text itself (an argument, an env value), what follows its first "="
+    (`--url=...`, `KEY=...`) and, when it is JSON, every string in it. Only
+    those that start like a URL."""
+    out: list[str] = []
+    for cand in (text, text.partition("=")[2], *_json_strings(text)):
+        cand = cand.translate(urls.DROPPED).strip(urls.C0_AND_SPACE)
+        if _START_RE.match(cand) and cand not in out:
+            out.append(cand)
     return out
 
 
@@ -126,48 +301,104 @@ def _unparseable_url(where: str) -> dict:
         "it points is unknown - treated as unsafe")
 
 
-def _text_blobs(cfg: dict) -> list[tuple[str, str]]:
-    """(where, text) pairs worth scanning: args joined + env values."""
-    blobs = []
-    args = cfg.get("args") or []
-    if args:
-        blobs.append(("args", " ".join(str(a) for a in args)))
-    for k, v in (cfg.get("env") or {}).items():
-        blobs.append((f"env:{k}", str(v)))
+def _ambiguous_url(where: str) -> dict:
+    # Like _unparseable_url, it does not echo the URL.
+    return _finding(
+        "high", "unparseable-url",
+        f"ambiguous URL in {where}: URL parsers disagree about its host (a "
+        "backslash or a percent escape before the path, for example), so "
+        "where it points is unknown - treated as unsafe")
+
+
+def _units(cfg: dict) -> list[tuple[str, str]]:
+    """(where, text) pairs worth scanning, one by one: each argument, each env
+    value and the command. An argument is what a program gets a URL from, so
+    the arguments are not joined into one text."""
+    units = [("args", str(a)) for a in cfg.get("args") or []]
+    units += [(f"env:{k}", str(v)) for k, v in (cfg.get("env") or {}).items()]
     if cfg.get("command"):
-        blobs.append(("command", str(cfg.get("command"))))
-    return blobs
+        units.append(("command", str(cfg.get("command"))))
+    return units
 
 
-def detect_exfiltration(name: str, cfg: dict) -> list[dict]:
-    """Remote URLs baked into a server's launch config."""
-    findings = []
+#: The keys a server entry names a remote server's URL by: `url` (Claude
+#: Code, Cursor, VS Code, Zed ...) and `serverUrl`, which a reviewer reports
+#: Windsurf and Devin write (not checked against their pages: reading a key
+#: a client does not use only widens what is audited).
+REMOTE_URL_KEYS = ("url", "serverUrl")
+
+
+def remote_urls(cfg: dict) -> "list[tuple[str, str]]":
+    """(key, URL) for each key of a server entry that names a remote server."""
+    return [(key, str(cfg[key])) for key in REMOTE_URL_KEYS if cfg.get(key)]
+
+
+def detect_exfiltration(name: str, cfg: dict, allow_hosts=()) -> list[dict]:
+    """Remote URLs baked into a server's launch config. `allow_hosts`: hosts
+    the user trusts (--allow-host, as host_pattern() writes them).
+
+    A URL that is plainly where a package comes from (a repository on a git
+    forge), which registry it comes through, or the remote server a bridge
+    connects to is judged as that (see "Where a launch gets its code from");
+    every other URL is a remote endpoint. A remote server (a `url` or
+    `serverUrl` entry) is one more finding - and the launch arguments and
+    environment of an entry that has both are read all the same: a URL
+    field must not switch the reading of a command off."""
+    findings: list[dict] = []
     # Remote (non-stdio) servers are inherently networked — note it.
-    if cfg.get("url"):
-        url = str(cfg["url"])
-        try:
-            local = _is_local(urllib.parse.urlsplit(url).hostname or "")
-        except ValueError:
-            return [_unparseable_url("url")]
-        if not local:
-            findings.append(_finding(
-                "medium", "remote-server",
-                "remote MCP server URL (traffic leaves the machine): "
-                f"{redact.safe_url(url)}"))
-        return findings
-    for where, text in _text_blobs(cfg):
-        for kind, url in _endpoints(text):
+    for key, url in remote_urls(cfg):
+        findings.extend(f for f in _remote_server(url, allow_hosts, key=key)
+                        if f not in findings)
+    judged: "dict[str, list[dict]]" = {}
+    for role in _roles(cfg):
+        if role.value not in judged and len(judged) >= _MAX_ROLES:
+            continue  # beyond the limit, a value is an endpoint like any other
+        found = _role_findings(role, allow_hosts)
+        if found is not None:
+            judged.setdefault(role.value, []).extend(found)
+    for where, text in _units(cfg):
+        for value, found in judged.items():
+            text, hit = _mask(text, value)
+            if hit:
+                findings.extend(f for f in found if f not in findings)
+        for kind, shown in _endpoints(text, allow_hosts):
             if kind == "unparseable":
                 findings.append(_unparseable_url(where))
+                continue
+            if kind == "ambiguous":
+                findings.append(_ambiguous_url(where))
                 continue
             # A remote endpoint baked into launch args is critical. In env it
             # is usually service config (API base URLs), so medium: worth a
             # look, not a verdict. Well-known API hosts are not reported.
             sev = "medium" if where.startswith("env:") else "critical"
-            shown = redact.safe_url(url) if kind == "url" else url
             findings.append(_finding(
                 sev, "exfiltration-endpoint",
                 f"remote endpoint in {where}: {shown}"))
+    return findings
+
+
+def _remote_server(url: str, allow=(), via: str = "",
+                   key: str = "url") -> list[dict]:
+    """Findings for a `url` entry: a remote server by design (medium), unless
+    every host a parser could read it as is the local machine or one the user
+    trusts. (`via`: the bridge it is reached through; `key`: the field of the
+    entry that holds it.)"""
+    try:
+        parsed = urls.parse(url)
+    except urls.UnparseableUrl:
+        return [_unparseable_url(key)]
+    loud = [r for r in parsed.readings
+            if not _quiet(parsed.scheme, r, local_only=True, allow=allow)]
+    if parsed.readings and not loud:
+        return []
+    shown = (_shown(parsed, loud) if loud else redact.safe_url(url))
+    findings = [_finding(
+        "medium", "remote-server",
+        f"remote MCP server URL (traffic leaves the machine): {shown}"
+        + (f" (reached through {via})" if via else ""))]
+    if parsed.ambiguous:
+        findings.append(_ambiguous_url(key))
     return findings
 
 
@@ -626,6 +857,7 @@ class Package(NamedTuple):
     version: "str | None"  # as written ("1.2.3", "latest", "^1.2.0"), if any
     exact: bool            # one release (or a digest): the same on every launch
     ecosystem: str         # "npm" or "PyPI"
+    spec: str = ""         # the argument it was read from: "pkg@1.2.3"
 
     def release(self) -> "str | None":
         """The exact release number, or None when only a range, a tag or a
@@ -659,7 +891,7 @@ def _npm_package(spec: str) -> "Package | None":
     version = m.group(2) or None
     exact = version is not None and bool(
         _NPM_EXACT_RE.fullmatch(version) or _DIGEST_RE.fullmatch(version))
-    return Package(m.group(1), version, exact, "npm")
+    return Package(m.group(1), version, exact, "npm", spec)
 
 
 def _py_package(spec: str) -> "Package | None":
@@ -673,18 +905,18 @@ def _py_package(spec: str) -> "Package | None":
     name = m.group(1)
     rest = m.group(2).split(";", 1)[0].strip()  # drop an environment marker
     if not rest:
-        return Package(name, None, False, "PyPI")
+        return Package(name, None, False, "PyPI", spec)
     if rest.startswith("@"):  # uvx pkg@1.2.3, uvx pkg@latest
         version = rest[1:].strip() or None
         exact = version is not None and (
             _PY_RELEASE_RE.fullmatch(version) is not None
             or _DIGEST_RE.fullmatch(version) is not None)
-        return Package(name, version, exact, "PyPI")
+        return Package(name, version, exact, "PyPI", spec)
     for clause in rest.split(","):  # PEP 440: any exact clause pins it
         c = re.fullmatch(r"\s*===?\s*(\S+)\s*", clause)
         if c and _PY_RELEASE_RE.fullmatch(c.group(1)):
-            return Package(name, c.group(1), True, "PyPI")
-    return Package(name, rest, False, "PyPI")
+            return Package(name, c.group(1), True, "PyPI", spec)
+    return Package(name, rest, False, "PyPI", spec)
 
 
 #: Options of the npm-style runners that take a value, so that the value is
@@ -716,7 +948,10 @@ _NPM_VIA = frozenset({("pnpm", "dlx"), ("yarn", "dlx"), ("npm", "exec"),
 def _split_runner_args(args: "list[str]", value_opts) -> tuple:
     """(options, first positional) of a runner's arguments. Options are
     (name, value|None); everything after the positional belongs to the
-    program being run."""
+    program being run. An option named for a credential (`--auth`, `--token`,
+    `--password`) takes the next argument as its value even when the runner
+    is not known to give it one: that argument is a secret, not the
+    package."""
     opts: "list[tuple[str, str | None]]" = []
     i, n = 0, len(args)
     while i < n:
@@ -730,7 +965,7 @@ def _split_runner_args(args: "list[str]", value_opts) -> tuple:
             k, v = a.split("=", 1)
             opts.append((k, v))
             i += 1
-        elif a in value_opts and i + 1 < n:
+        elif (a in value_opts or redact.takes_a_credential(a)) and i + 1 < n:
             opts.append((a, args[i + 1]))
             i += 2
         else:
@@ -761,24 +996,43 @@ def _py_packages(args: "list[str]", spec_opt: str = "--from"
     return [p for p in map(_py_package, specs) if p]
 
 
-def _packages_of(name: str, args: "list[str]") -> "list[Package]":
-    """What `name args...` downloads, if it is a package runner."""
+class _Runner(NamedTuple):
+    """How a package runner reads its command line."""
+
+    ecosystem: str          # "npm" or "py"
+    args: "list[str]"       # what follows the runner (and `dlx`, `run` ...)
+    call_is_command: bool   # `-c` hands it a command string, so no package
+    spec_opt: str           # the option that names the package, if not first
+
+
+def _runner(name: str, args: "list[str]") -> "_Runner | None":
+    """`name args...` read as a package runner (npx, pnpm dlx, uvx, pipx run
+    ...), or None when it is not one."""
     if name in _NPM_RUNNERS:
-        return _npm_packages(args, call_is_command=(name == "npx"))
+        return _Runner("npm", args, name == "npx", "")
     if name in ("pnpm", "yarn", "npm", "bun"):
         rest = [a for a in args if not a.startswith("-")][:1]
         if rest and (name, rest[0]) in _NPM_VIA:
             i = args.index(rest[0])
-            return _npm_packages(args[i + 1:],
-                                 call_is_command=(name == "npm"))
-        return []
+            return _Runner("npm", args[i + 1:], name == "npm", "")
+        return None
     if name == "uvx":
-        return _py_packages(args)
+        return _Runner("py", args, False, "--from")
     if name == "uv" and args[:2] == ["tool", "run"]:
-        return _py_packages(args[2:])
+        return _Runner("py", args[2:], False, "--from")
     if name == "pipx" and args[:1] == ["run"]:
-        return _py_packages(args[1:], spec_opt="--spec")
-    return []
+        return _Runner("py", args[1:], False, "--spec")
+    return None
+
+
+def _packages_of(name: str, args: "list[str]") -> "list[Package]":
+    """What `name args...` downloads, if it is a package runner."""
+    runner = _runner(name, args)
+    if runner is None:
+        return []
+    if runner.ecosystem == "npm":
+        return _npm_packages(runner.args, runner.call_is_command)
+    return _py_packages(runner.args, runner.spec_opt)
 
 
 def _launched(cfg: dict) -> "list[tuple[str, list[str]]]":
@@ -797,6 +1051,235 @@ def _iter_packages(cfg: dict) -> "list[Package]":
     for name, args in _launched(cfg):
         out.extend(_packages_of(name, args))
     return out
+
+
+# -- Where a launch gets its code from ----------------------------------------
+#
+# A URL in a server's arguments is a remote endpoint, and critical. Three
+# shapes of it are ordinary, and are judged as what they are:
+#
+#   a package source    uvx --from git+https://github.com/o/r pkg, npx github:o/r
+#   a registry          npx --registry=https://r.example/, uvx --index-url URL
+#   a bridge's server   npx mcp-remote https://vendor.example/sse
+#
+# A value gets a verdict of its own only when it qualifies in every way a
+# parser could read it: one host, spelled out, the same to every parser, and
+# for a source a git forge. A look-alike host, a backslash or an escape in it
+# sends the value back to the scan for endpoints, which is critical.
+
+class _Role(NamedTuple):
+    kind: str             # "source", "registry" or "bridge"
+    value: str            # exactly as written: an argument or an option's value
+    via: str              # the option, variable or program it came from
+    ecosystem: str = ""   # "npm" or "py", for a source
+
+
+_SOURCE_OPTS = {"npm": frozenset({"-p", "--package"}),
+                "py": frozenset({"--from", "--spec", "--with",
+                                 "--with-editable"})}
+_REGISTRY_OPTS = {
+    "npm": frozenset({"--registry"}),
+    "py": frozenset({"--index-url", "-i", "--index", "--default-index",
+                     "--extra-index-url", "--extra-index", "-f",
+                     "--find-links"})}
+_SCOPED_REGISTRY_RE = re.compile(r"--@[^=\s]{1,100}:registry")
+_GIT_URL_RE = re.compile(r"git\+(https?://.*)", re.IGNORECASE | re.DOTALL)
+_GIT_SHORT_RE = re.compile(r"(github|gitlab|bitbucket):([\w.\-]+/[\w.\-]+)"
+                           r"(?:#(.*))?", re.IGNORECASE | re.DOTALL)
+_SHORT_HOSTS = {"github": "github.com", "gitlab": "gitlab.com",
+                "bitbucket": "bitbucket.org"}
+_COMMIT_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+_TAG_RE = re.compile(r"(?:refs/tags/)?v?\d+(?:\.\d+){1,3}"
+                     r"(?:[-+.][0-9A-Za-z.\-]+)?")
+_EDGE_BEFORE = frozenset(" \t\r\n'\"=")
+_EDGE_AFTER = frozenset(" \t\r\n'\"")
+#: Distinct values of one entry that get a verdict of their own. A real entry
+#: has a handful; the rest of a crowd is judged as endpoints (critical).
+_MAX_ROLES = 64
+
+
+def _bridge_roles(bridge: str, args: "list[str]") -> "list[_Role]":
+    """The URL of the server a bridge connects to: the value of the option
+    that takes it (`--sse URL`, `--sse=URL`) or, failing that, the first
+    argument that is a URL. A bridge has one server: any other URL it is given
+    (a callback, say) is an endpoint like any other, and critical."""
+    for i, arg in enumerate(args):
+        opt, eq, value = arg.partition("=")
+        if opt.lower() not in _BRIDGE_URL_OPTS:
+            continue
+        if not eq:
+            value = args[i + 1] if i + 1 < len(args) else ""
+        if _START_RE.match(value):
+            return [_Role("bridge", value, bridge)]
+    for arg in args:
+        if _START_RE.match(arg):
+            return [_Role("bridge", arg, bridge)]
+    return []
+
+
+def _roles(cfg: dict) -> "list[_Role]":
+    """The values of an entry that say where its code comes from."""
+    out: "list[_Role]" = []
+    for name, args in _launched(cfg):
+        if name in BRIDGES:
+            out.extend(_bridge_roles(name, args))
+            continue
+        runner = _runner(name, args)
+        if runner is None:
+            continue
+        eco = runner.ecosystem
+        opts, positional = _split_runner_args(
+            runner.args, _NPM_VALUE_OPTS if eco == "npm" else _PY_VALUE_OPTS)
+        for opt, value in opts:
+            if not value:
+                continue
+            if opt in _REGISTRY_OPTS[eco] or (
+                    eco == "npm" and _SCOPED_REGISTRY_RE.fullmatch(opt)):
+                out.append(_Role("registry", value, opt))
+            elif opt in _SOURCE_OPTS[eco]:
+                out.append(_Role("source", value, opt, eco))
+        if positional:
+            out.append(_Role("source", positional, name, eco))
+            package = (_npm_package if eco == "npm"
+                       else _py_package)(positional)
+            if package is not None and package.name.lower() in BRIDGES:
+                after = runner.args[runner.args.index(positional) + 1:]
+                out.extend(_bridge_roles(package.name.lower(), after))
+    for key, value in (cfg.get("env") or {}).items():
+        if str(key).lower() in _REGISTRY_ENV:
+            out.append(_Role("registry", str(value), str(key)))
+    return out
+
+
+def _single(parsed: urls.Url) -> "urls.Reading | None":
+    """The one host every parser reads `parsed` as, when there is one and the
+    text spells it out; else None. (Parsers that disagree give readings with
+    different hosts, and an escape, a non-ASCII name or a character no host
+    has gives a reading that is not exact.)"""
+    if not parsed.readings:
+        return None
+    first = parsed.readings[0]
+    if all(r.exact and r.host == first.host for r in parsed.readings):
+        return first
+    return None
+
+
+def _git_ref(url: str, npm: bool) -> "str | None":
+    """The commit, tag or branch a git URL names, if it names one: npm writes
+    it after `#`, pip and uv after an `@` in the path."""
+    base, _, fragment = url.partition("#")
+    if npm:
+        return fragment or None
+    path = (base.split("://", 1)[1] if "://" in base else base).partition(
+        "/")[2]
+    if "@" not in path:
+        return None
+    return path.rpartition("@")[2] or None
+
+
+def _source_findings(role: _Role, allow) -> "list[dict] | None":
+    spec, ref = role.value, None
+    match = _GIT_URL_RE.fullmatch(spec)
+    if match:
+        parsed = urls.parse(match.group(1))
+        reading = _single(parsed)
+        if reading is None or parsed.scheme != "https":
+            return None
+        host, shown = reading.host, _shown(parsed, [reading])
+        ref = _git_ref(match.group(1), role.ecosystem == "npm")
+    else:
+        short = (_GIT_SHORT_RE.fullmatch(spec) if role.ecosystem == "npm"
+                 else None)
+        if short is None:
+            return None
+        host = _SHORT_HOSTS[short.group(1).lower()]
+        shown, ref = f"https://{host}/...", short.group(3) or None
+    if not (_listed(host, GIT_FORGES) or _trusted("https", host, allow)):
+        return None
+    if ref and _COMMIT_RE.fullmatch(ref):
+        severity, detail = "low", "pinned to a commit"
+    elif ref and _TAG_RE.fullmatch(ref):
+        severity, detail = "low", ("pinned to a tag, which can be moved to "
+                                  "other code")
+    elif ref:
+        severity, detail = "medium", ("pinned to a branch or a range, so "
+                                      "every launch can run different code")
+    else:
+        severity, detail = "medium", ("no commit or tag pinned, so every "
+                                      "launch runs whatever the default "
+                                      "branch holds")
+    message = (f"package comes from a git repository, not a registry: "
+               f"{shown} ({detail})")
+    if severity != "low" or "tag" in detail:
+        message += "; pin it to a commit"
+    return [_finding(severity, "git-source", message)]
+
+
+def _registry_findings(role: _Role, allow) -> "list[dict] | None":
+    parsed = urls.parse(role.value)
+    reading = _single(parsed)
+    if reading is None or parsed.scheme not in ("http", "https"):
+        return None
+    host = reading.host
+    if _is_local(host) or (parsed.scheme == "https" and (
+            _listed(host, DEFAULT_REGISTRIES)
+            or _trusted("https", host, allow))):
+        return []
+    shown = _shown(parsed, [reading])
+    if parsed.scheme == "http":
+        return [_finding(
+            "high", "package-registry",
+            f"package registry over plain http ({role.via}): {shown}; "
+            "anyone on the way can swap what it serves, and every package "
+            "this server installs comes from there")]
+    return [_finding(
+        "medium", "package-registry",
+        f"package registry other than the default ({role.via}): {shown}; "
+        "every package this server installs comes from there, so it can run "
+        "code as you. Point it only at a registry you run or trust "
+        "(--allow-host marks one)")]
+
+
+def _bridge_findings(role: _Role, allow) -> "list[dict] | None":
+    # (a bridge role is a value that starts like an http, https, ws or wss URL)
+    if _single(urls.parse(role.value)) is None:
+        return None
+    return _remote_server(role.value, allow, via=role.via)
+
+
+def _role_findings(role: _Role, allow) -> "list[dict] | None":
+    """The findings for a role's value - none when it is as expected - or
+    None when it does not qualify for a verdict of its own."""
+    try:
+        if role.kind == "source":
+            return _source_findings(role, allow)
+        if role.kind == "registry":
+            return _registry_findings(role, allow)
+        return _bridge_findings(role, allow)
+    except urls.UnparseableUrl:
+        return None
+
+
+def _mask(text: str, value: str) -> "tuple[str, bool]":
+    """`text` without the places where `value` stands as a whole word (not
+    as the start of a longer host: `https://registry.npmjs.org.evil.example`
+    is not `https://registry.npmjs.org`), and whether there were any."""
+    if not value:
+        return text, False
+    out, start, hit = [], 0, False
+    i = text.find(value)
+    while i >= 0:
+        end = i + len(value)
+        if ((i == 0 or text[i - 1] in _EDGE_BEFORE)
+                and (end == len(text) or text[end] in _EDGE_AFTER)):
+            out += [text[start:i], " "]
+            start, hit = end, True
+        # Searching on from the end of a place, whether it was masked or not,
+        # keeps this linear; a place that overlaps it stays unmasked, and the
+        # scan for endpoints sees it.
+        i = text.find(value, end)
+    out.append(text[start:])
+    return "".join(out), hit
 
 
 def detect_floating_version(name: str, cfg: dict) -> list[dict]:
@@ -937,12 +1420,13 @@ def detect_unauditable(name: str, cfg: dict) -> list[dict]:
     say so instead of letting it read as a clean bill of health (for
     instance a Zed server provided by an extension, whose command lives in
     the extension and not in settings.json)."""
-    if cfg.get("command") or cfg.get("url"):
+    if cfg.get("command") or remote_urls(cfg):
         return []
     return [_finding(
         "low", "unauditable",
-        "entry has no 'command' and no 'url' (provided by an extension?): "
-        "what it runs is not in this config, so nothing could be audited")]
+        "entry has no 'command' and no 'url' or 'serverUrl' (provided by an "
+        "extension?): what it runs is not in this config, so nothing could "
+        "be audited")]
 
 
 def detect_secret_env(name: str, cfg: dict) -> list[dict]:
@@ -985,7 +1469,7 @@ def _config_problem(cfg) -> str | None:
     if not isinstance(cfg, dict):
         return f"server entry is not a JSON object (got {type(cfg).__name__})"
     for key, want in (("command", str), ("args", list), ("env", dict),
-                      ("url", str)):
+                      ("url", str), ("serverUrl", str)):
         value = cfg.get(key)
         if value is not None and not isinstance(value, want):
             return (f"'{key}' must be {'a ' + want.__name__} "
@@ -994,8 +1478,10 @@ def _config_problem(cfg) -> str | None:
 
 
 def audit_server(name: str, cfg: dict,
-                 advisories: list[dict] | None = None) -> list[dict]:
-    """Run all static detectors against one server entry.
+                 advisories: list[dict] | None = None,
+                 allow_hosts=()) -> list[dict]:
+    """Run all static detectors against one server entry. `allow_hosts`: the
+    hosts the user trusts (--allow-host), as host_pattern() writes them.
 
     Fails closed: an entry that cannot be analyzed, or a detector that
     raises, is a HIGH finding (so --fail-on high trips) - never a quiet
@@ -1011,6 +1497,8 @@ def audit_server(name: str, cfg: dict,
         try:
             if det is detect_known_bad:
                 findings.extend(det(name, cfg, advisories))
+            elif det is detect_exfiltration:
+                findings.extend(det(name, cfg, allow_hosts))
             else:
                 findings.extend(det(name, cfg))
         except Exception as e:  # incl. RecursionError and MemoryError

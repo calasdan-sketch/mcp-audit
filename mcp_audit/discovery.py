@@ -18,8 +18,43 @@ from . import jsonc
 # live under %APPDATA%/%LOCALAPPDATA%, <dir>/AppData/Roaming and
 # <dir>/AppData/Local. One variable isolates every default path (the
 # test-suite relies on it; it also lets you audit a copied user profile).
-# While it is set XDG_CONFIG_HOME and COPILOT_HOME are ignored.
+# While it is set XDG_CONFIG_HOME and COPILOT_HOME are ignored, and the
+# system-wide managed file is looked for below <dir> too (see
+# managed_config_path).
 HOME_ENV = "MCP_AUDIT_HOME"
+
+#: The label of Claude Code's organization-managed servers, and where Claude
+#: Code looks for them: a `managed-mcp.json` shaped like a project's
+#: .mcp.json, at one system path per OS. The page that gives the paths
+#: (https://code.claude.com/docs/en/managed-mcp) names no variable that moves
+#: the file. Whoever manages the machine put it there: it is audited like any
+#: other config and never rewritten (--fix leaves it alone).
+MANAGED_CLIENT = "claude-code-managed"
+_MANAGED_FILE = {
+    "Darwin": "/Library/Application Support/ClaudeCode/managed-mcp.json",
+    "Windows": "C:\\Program Files\\ClaudeCode\\managed-mcp.json",
+}
+_MANAGED_FILE_ELSEWHERE = "/etc/claude-code/managed-mcp.json"  # Linux, WSL
+
+
+def is_managed_client(client: str) -> bool:
+    """True for the config an organization manages (see MANAGED_CLIENT)."""
+    return client == MANAGED_CLIENT
+
+
+def managed_config_path(system: str | None = None) -> str:
+    """Where Claude Code looks for the managed servers on `system` (this
+    machine's by default; every system but macOS and Windows reads the Linux
+    path). With MCP_AUDIT_HOME set, the directory stands in for the root of
+    the file system: <dir>/etc/claude-code/managed-mcp.json."""
+    path = _MANAGED_FILE.get(system or platform.system(),
+                             _MANAGED_FILE_ELSEWHERE)
+    override = os.environ.get(HOME_ENV)
+    if not override:
+        return path
+    parts = [p for p in path.replace("\\", "/").split("/")
+             if p and not p.endswith(":")]
+    return os.path.join(override, *parts)
 
 
 def roots() -> dict[str, str]:
@@ -103,6 +138,7 @@ def candidate_paths() -> list[tuple[str, str]]:
         devin_dirs.append(os.path.join(appdata, "devin"))
         zed_files.append(os.path.join(appdata, "Zed", "settings.json"))
     paths = [
+        (MANAGED_CLIENT, managed_config_path(system)),
         ("claude-code", os.path.join(home, ".claude.json")),
         ("claude-code-project", os.path.join(cwd, ".mcp.json")),
         ("cursor", os.path.join(home, ".cursor", "mcp.json")),

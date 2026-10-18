@@ -539,8 +539,9 @@ class TestDeepInTheCli(unittest.TestCase):
         (res,) = json.loads(out)["results"]
         injection = [f for f in res["findings"]
                      if f["check"] == "tool-description-injection"]
-        self.assertEqual({f["severity"] for f in injection}, {"critical"})
-        self.assertEqual(res["grade"], "F")
+        # one finding for the one description, however many signals it has
+        self.assertEqual([f["severity"] for f in injection], ["critical"])
+        self.assertEqual(res["grade"], "D")
         self.assertEqual(res["score"], 100 - 40 * len(injection))
 
     def test_a_probe_that_only_partly_succeeded_says_so(self):

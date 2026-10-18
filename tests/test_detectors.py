@@ -178,18 +178,23 @@ class TestStaticDetectors(unittest.TestCase):
 
     def test_secret_env_flags_every_word_the_readme_lists(self):
         # README: a variable whose name has a TOKEN, KEY, SECRET, PASSWORD,
-        # PASSPHRASE, CREDENTIAL, BEARER, COOKIE, DSN or PAT word. (`*_KEY`
-        # used to slip through: OPENAI_KEY was reported clean.)
+        # PASSWD, PASSPHRASE, CREDENTIAL, AUTHORIZATION, BEARER, COOKIE, DSN,
+        # PAT or APIKEY word, or whose last word is AUTH or PASS. (`*_KEY`
+        # used to slip through: OPENAI_KEY was reported clean; so did MY_PASS,
+        # AUTH and APIKEY.)
         def flagged(name):
             cfg = {"command": "node", "args": ["a.js"], "env": {name: "x"}}
             return bool(detectors.detect_secret_env("s", cfg))
         for name in ("AUTH_TOKEN", "OPENAI_KEY", "STRIPE_SECRET_KEY", "KEY",
                      "apiKey", "CLIENT_SECRET", "DB_PASSWORD", "SSH_PASSPHRASE",
                      "AWS_CREDENTIALS", "BEARER", "SESSION_COOKIE",
-                     "SENTRY_DSN", "GITHUB_PAT", "accessToken"):
+                     "SENTRY_DSN", "GITHUB_PAT", "accessToken", "DB_PASSWD",
+                     "HTTP_AUTHORIZATION", "APIKEY", "X_APIKEY", "MY_PASS",
+                     "PASS", "AUTH", "BASIC_AUTH", "mysql_pass"):
             self.assertTrue(flagged(name), name)
         for name in ("PUBLIC_KEY", "KEYBOARD_LAYOUT", "MONKEY", "PATH",
-                     "NODE_ENV", "PORT"):
+                     "NODE_ENV", "PORT", "AUTH_URL", "AUTH0_DOMAIN",
+                     "PASS_THROUGH", "PASSENGER", "COMPASS", "AUTHOR"):
             self.assertFalse(flagged(name), name)
 
     def test_nasty_server_scores_f(self):
