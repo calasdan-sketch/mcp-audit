@@ -1,48 +1,160 @@
 """mcp-audit: `npm audit` for your agent's MCP tool supply chain."""
 
 import argparse
+import codecs
 import contextlib
 import errno
 import json
 import os
+import re
 import shutil
 import stat
 import sys
+import tempfile
 import time
 
 from . import __version__
 from . import deep as deep_mod
 from . import detectors
 from . import discovery
+from . import redact
 from . import scoring
 
 
-def _audit_one(name: str, cfg: dict, client: str, path: str,
-               deep: bool, advisories: list[dict],
+def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
                online: bool = False) -> dict:
+    """Statically audit one server entry of a discovered group (see
+    discovery). Nothing is launched here: that is the --deep step."""
+    client, path = group["client"], group["path"]
     findings = detectors.audit_server(name, cfg, advisories)
     if online:
         findings.extend(detectors.detect_osv(name, cfg))
     tools: list[dict] = []
-    if deep:
-        probe = deep_mod.probe_server(cfg)
-        if probe["ok"]:
-            tools = probe["tools"]
-            findings.extend(deep_mod.audit_descriptions(tools))
-        elif probe["error"]:
-            findings.append({"severity": "low", "check": "deep-probe",
-                             "message": f"--deep probe: {probe['error']}"})
+    for f in findings:  # whatever produced it, nothing secret goes out
+        f["message"] = redact.clean(f["message"])
     score, grade = scoring.score(findings)
-    return {"name": name, "client": client, "path": path,
-            "config": cfg, "findings": findings,
-            "score": score, "grade": grade, "tools": tools}
+    result = {"name": name, "client": client, "path": path,
+              "config": cfg, "findings": findings,
+              "score": score, "grade": grade, "tools": tools,
+              "key_path": group.get("key_path")}
+    if group.get("project") is not None:
+        result["project"] = group["project"]
+    return result
 
 
-def _backup(path: str) -> str:
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    bak = f"{path}.mcp-audit.bak-{stamp}"
-    shutil.copy2(path, bak)
-    return bak
+def _audit_all(discovered: list[dict], advisories: list[dict],
+               online: bool) -> list[dict]:
+    return [_audit_one(name, cfg, d, advisories, online)
+            for d in discovered for name, cfg in d["servers"].items()]
+
+
+def _note(text: str) -> None:
+    """A line for the operator on stderr (stdout carries the report)."""
+    sys.stderr.write(f"[mcp-audit] {redact.clean(text)}\n")
+
+
+def _has_critical(result: dict) -> bool:
+    return any(f["severity"] == "critical" for f in result["findings"])
+
+
+def _add_findings(result: dict, new: list[dict]) -> None:
+    """Fold findings found after the static audit into a result: cleaned
+    like the rest, and the score and grade follow."""
+    for f in new:
+        f["message"] = redact.clean(f["message"])
+    result["findings"].extend(new)
+    result["score"], result["grade"] = scoring.score(result["findings"])
+
+
+_HELD_BECAUSE = {
+    "critical": ("it has critical findings, and launching it would run the "
+                 "command that was flagged", "--probe-critical"),
+    "project": ("it comes from a project file in the current directory, so "
+                "whoever wrote that project, say a repository you have just "
+                "cloned, chose what it would run", "--probe-project"),
+}
+
+
+def _hold_reasons(result: dict, probe_critical: bool,
+                  probe_project: bool) -> list[str]:
+    """Why --deep must leave this server alone, from _HELD_BECAUSE; empty
+    when it may be launched.
+
+    "critical": the static audit rated it critical. "project": it comes from
+    a file found in the current directory (discovery.PROJECT_CLIENTS), which
+    is not yours: a cloned repository names its own commands. A server that
+    would not be launched anyway (a remote one) is not held back for that:
+    it keeps its own `deep-probe` finding."""
+    reasons = []
+    if _has_critical(result) and not probe_critical:
+        reasons.append("critical")
+    if (not probe_project and discovery.is_project_client(result["client"])
+            and deep_mod.not_launchable(result["config"]) is None):
+        reasons.append("project")
+    return reasons
+
+
+def _held_text(reasons: list[str]) -> str:
+    """The reasons, and what it takes to launch the server anyway."""
+    why = "; and ".join(_HELD_BECAUSE[r][0] for r in reasons)
+    flags = [_HELD_BECAUSE[r][1] for r in reasons]
+    if len(flags) == 1:
+        return f"{why} ({flags[0]} launches it anyway)"
+    return f"{why} (it takes {' and '.join(flags)} to launch it)"
+
+
+def _deep_pass(results: list[dict], probe_critical: bool,
+               probe_project: bool) -> None:
+    """The --deep step: launch the servers that may be launched, read their
+    tool descriptions, fold what they say into `results`.
+
+    Launching runs the commands in the configs, with the user's rights, so
+    this says what it is about to launch BEFORE it launches anything. It
+    leaves alone the servers the static audit rated critical (launching one
+    runs the very command that was flagged) unless `probe_critical` is set,
+    and the servers that come from a project file in the current directory
+    (whoever wrote the project chose their commands: think of a repository
+    you have just cloned) unless `probe_project` is set. A server that is
+    left alone, or cannot be probed, gets a low `deep-probe` finding: --deep
+    never reports a server as read when it was not."""
+    holds = {id(r): _hold_reasons(r, probe_critical, probe_project)
+             for r in results}
+    held_back = {i for i, reasons in holds.items() if reasons}
+    launching = {id(r) for r in results
+                 if id(r) not in held_back
+                 and deep_mod.not_launchable(r["config"]) is None}
+    if launching:
+        _note(f"--deep will now LAUNCH {len(launching)} MCP server(s) on this "
+              "machine, with your user rights, and talk to them over stdio. "
+              "A server can do anything you can: only go on if you would "
+              "run these yourself.")
+        for r in results:
+            if id(r) in launching:
+                _note(f"  '{r['name']}' <{r['client']}> from {r['path']}: "
+                      f"{redact.command_line(r['config'])}")
+    for r in results:
+        if id(r) in held_back:
+            _note(f"--deep leaves '{r['name']}' <{r['client']}> from "
+                  f"{r['path']} alone: {_held_text(holds[id(r)])}")
+    sys.stderr.flush()
+    for r in results:
+        if id(r) in held_back:
+            _add_findings(r, [{
+                "severity": "low", "check": "deep-probe",
+                "message": "--deep did not launch this server: "
+                           + _held_text(holds[id(r)])}])
+            continue
+        if id(r) in launching:
+            _note(f"probing '{r['name']}'...")
+        probe = deep_mod.probe_server(r["config"])
+        new: list[dict] = []
+        if probe["ok"]:
+            r["tools"] = probe["tools"]
+            new += deep_mod.audit_descriptions(probe["tools"])
+        if probe.get("error"):
+            new.append({"severity": "low", "check": "deep-probe",
+                        "message": f"--deep probe: {probe['error']}"})
+        _add_findings(r, new)
 
 
 # Only unambiguous launch-time attacks are fixable. URL/description/advisory
@@ -50,50 +162,259 @@ def _backup(path: str) -> str:
 FIXABLE_CHECKS = ("suspicious-command", "pipe-to-shell")
 
 
-def _apply_fix(results: list[dict], remove: bool = False) -> list[str]:
-    """Remove servers with critical suspicious-command/pipe-to-shell findings.
+def _fixable_shape(result: dict) -> bool:
+    """True when the server sits in a layout --fix owns: a flat
+    mcpServers/servers object, or Claude Code's local scope."""
+    key_path = result.get("key_path") or []
+    return (key_path in (["mcpServers"], ["servers"])
+            or (len(key_path) == 3 and key_path[0] == "projects"
+                and key_path[2] == "mcpServers"))
 
-    Without remove=True (--remove) this is a dry run that only reports.
-    Backs up each touched config first. Returns human-readable actions."""
-    actions: list[str] = []
-    # group results by config path
-    by_path: dict[str, list[dict]] = {}
+
+def _servers_at(data, result: dict):
+    """The servers object a result came from, or None if it moved."""
+    node = data
+    for key in result["key_path"]:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node if isinstance(node, dict) else None
+
+
+def _where(result: dict) -> str:
+    """Where in its file a server sits, for the --fix plan."""
+    key_path = result.get("key_path") or []
+    return " > ".join(str(k) for k in key_path) or "?"
+
+
+def _plan_fix(results: list[dict]) -> "tuple[list[dict], list[str]]":
+    """What --fix would remove, and the notes about what it will leave.
+
+    One item per server with a critical suspicious-command / pipe-to-shell
+    finding in a layout --fix owns."""
+    items: list[dict] = []
+    notes: list[str] = []
+    skipped: set[str] = set()
     for r in results:
-        by_path.setdefault(r["path"], []).append(r)
-
-    for path, group in by_path.items():
-        with open(path, encoding="utf-8-sig") as f:
-            data = json.load(f)
-        if "mcpServers" not in data and "servers" not in data:
+        crit = [f for f in r["findings"]
+                if f["severity"] == "critical"
+                and f["check"] in FIXABLE_CHECKS]
+        if not crit:
+            continue
+        if not _fixable_shape(r):
             # e.g. VS Code's nested {"mcp": {"servers": ...}} shape: we don't
             # rewrite layouts we don't fully own. Report-only, never silent.
-            actions.append(f"skipped {path}: --fix only rewrites flat "
-                           "mcpServers/servers shapes")
+            if r["path"] not in skipped:
+                skipped.add(r["path"])
+                notes.append(f"skipped {r['path']}: --fix only rewrites flat "
+                             "mcpServers/servers shapes")
             continue
-        key = "mcpServers" if "mcpServers" in data else "servers"
-        servers = data.get(key, {})
-        changed = False
-        for r in group:
-            crit = [f for f in r["findings"]
-                    if f["severity"] == "critical"
-                    and f["check"] in FIXABLE_CHECKS]
-            if crit and r["name"] in servers and not remove:
-                reasons = "; ".join(c["check"] for c in crit)
-                actions.append(f"would remove '{r['name']}' ({reasons}) — "
-                               "re-run with --fix --remove to apply")
-                continue
-            if crit and r["name"] in servers:
-                if not changed:
-                    bak = _backup(path)
-                    actions.append(f"backed up {path} -> {bak}")
-                    changed = True
-                del servers[r["name"]]
-                reasons = "; ".join(c["check"] for c in crit)
-                actions.append(f"removed '{r['name']}' ({reasons})")
-        if changed:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-    return actions
+        items.append({
+            "path": r["path"], "name": r["name"], "client": r["client"],
+            "key_path": r["key_path"], "config": r["config"],
+            "where": _where(r),
+            "reasons": "; ".join(dict.fromkeys(f["check"] for f in crit)),
+            "runs": redact.command_line(r["config"]),
+        })
+    return items, notes
+
+
+class _Skip(Exception):
+    """A file --fix will not rewrite; the message says why."""
+
+
+def _load_for_rewrite(path: str) -> "tuple[object, bytes, dict]":
+    """(data, raw bytes, style) of a config --fix may rewrite, or _Skip.
+
+    Only plain UTF-8 JSON is rewritten: a file with comments or trailing
+    commas (JSONC) cannot be written back without losing them."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise _Skip(f"cannot read it ({e.strerror or type(e).__name__})")
+    bom = raw.startswith(codecs.BOM_UTF8)
+    try:
+        text = raw[len(codecs.BOM_UTF8):].decode("utf-8") if bom \
+            else raw.decode("utf-8")
+        data = json.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise _Skip("it is not plain UTF-8 JSON (comments, trailing commas "
+                    "or another encoding?); remove the server by hand")
+    m = re.search(r"\n([ \t]+)\S", text)
+    style = {"bom": bom, "indent": m.group(1) if m else None,
+             "crlf": "\r\n" in text, "final_newline": text.endswith("\n")}
+    return data, raw, style
+
+
+def _dump(data, style: dict) -> bytes:
+    """`data` as JSON bytes in the style of the file it came from."""
+    def dumps(ensure_ascii: bool) -> bytes:
+        text = json.dumps(data, indent=style["indent"],
+                          ensure_ascii=ensure_ascii)
+        if style["crlf"]:
+            text = text.replace("\n", "\r\n")
+        if style["final_newline"]:
+            text += "\r\n" if style["crlf"] else "\n"
+        out = text.encode("utf-8")
+        return codecs.BOM_UTF8 + out if style["bom"] else out
+    try:
+        return dumps(False)
+    except UnicodeEncodeError:  # a lone surrogate: keep it as an escape
+        return dumps(True)
+
+
+def _write_backup(path: str, raw: bytes) -> str:
+    """Save `raw` next to `path` under a name that is not taken yet."""
+    base = f"{path}.mcp-audit.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_BINARY", 0))
+    for n in range(1000):
+        bak = base if n == 0 else f"{base}-{n}"
+        try:
+            fd = os.open(bak, flags, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        try:
+            shutil.copystat(path, bak)
+        except OSError:
+            pass
+        return bak
+    raise OSError("no free backup name")
+
+
+def _write_atomic(path: str, data: bytes) -> None:
+    """Replace `path` with `data` in one step: a crash or a full disk leaves
+    the old file, never half a new one."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            shutil.copymode(path, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _apply_fix(items: list[dict]) -> "tuple[list[str], bool]":
+    """Remove the planned servers, one config file at a time.
+
+    Each touched file is backed up first and replaced atomically in the style
+    it had (indent, line endings, BOM). A server whose entry is no longer the
+    one that was audited is left alone. Returns (lines to show, all ok)."""
+    lines: list[str] = []
+    ok = True
+    by_path: dict[str, list[dict]] = {}
+    for it in items:
+        by_path.setdefault(it["path"], []).append(it)
+    for shown, group in by_path.items():
+        path = os.path.realpath(shown)  # a symlinked config stays a symlink
+        try:
+            data, raw, style = _load_for_rewrite(path)
+        except _Skip as e:
+            lines.append(f"skipped {shown}: {e}")
+            continue
+        removed = []
+        for it in group:
+            servers = _servers_at(data, it)
+            if servers is None or it["name"] not in servers:
+                lines.append(f"skipped '{it['name']}' in {shown}: it is no "
+                             "longer there")
+            elif servers[it["name"]] != it["config"]:
+                lines.append(f"skipped '{it['name']}' in {shown}: the entry "
+                             "changed since it was audited")
+            else:
+                del servers[it["name"]]
+                removed.append(it)
+        if not removed:
+            continue
+        try:
+            bak = _write_backup(path, raw)
+            lines.append(f"backed up {shown} -> {bak}")
+            _write_atomic(path, _dump(data, style))
+            check = _load_for_rewrite(path)[0]
+            if check != data:
+                raise OSError("the rewritten file does not read back as "
+                              "intended")
+        except OSError as e:
+            ok = False
+            lines.append(f"FAILED to rewrite {shown}: "
+                         f"{e.strerror or e}; its backup is untouched")
+            continue
+        for it in removed:
+            lines.append(f"removed '{it['name']}' ({it['reasons']}) from "
+                         f"{shown}")
+    return lines, ok
+
+
+def _confirm_removal(count: int, files: int, yes: bool) -> str:
+    """"yes", "no", or "refuse" when there is nobody to ask and no --yes."""
+    if yes:
+        return "yes"
+    stdin = sys.stdin
+    try:
+        interactive = stdin is not None and stdin.isatty()
+    except (OSError, ValueError, AttributeError):
+        interactive = False
+    if not interactive:
+        return "refuse"
+    sys.stderr.write(
+        f"[mcp-audit] Remove {count} server(s) from {files} file(s)? Each "
+        "file is backed up first. [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = stdin.readline()
+    except (OSError, ValueError):
+        answer = ""
+    return "yes" if answer.strip().lower() in ("y", "yes") else "no"
+
+
+def _run_fix(results: list[dict], remove: bool,
+             yes: bool) -> "tuple[int | None, bool]":
+    """The --fix step. Shows exactly what would be removed, asks, then
+    removes. Returns (exit code to stop with or None, whether a rewrite
+    failed)."""
+    items, notes = _plan_fix(results)
+    for n in notes:
+        _note(n)
+    if not items:
+        _note("--fix: nothing to remove")
+        return None, False
+    for it in items:
+        _note(f"would remove '{it['name']}' ({it['reasons']}) from "
+              f"{it['path']} [{it['client']}: {it['where']}]")
+        _note(f"    it runs: {it['runs']}")
+    if not remove:
+        _note("dry run - nothing was changed. Re-run with --fix --remove to "
+              "remove these (it asks first; --yes skips the question)")
+        return None, False
+    files = len({it["path"] for it in items})
+    answer = _confirm_removal(len(items), files, yes)
+    if answer == "refuse":
+        _note(f"error: --fix --remove would remove {len(items)} server(s) "
+              "but there is no terminal to ask on; re-run with --yes to "
+              "confirm. Nothing was changed.")
+        return 2, False
+    if answer == "no":
+        _note("nothing was removed")
+        return None, False
+    lines, ok = _apply_fix(items)
+    for line in lines:
+        _note(line)
+    return None, not ok
 
 
 def _harden_streams() -> None:
@@ -130,23 +451,46 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     p.add_argument("--deep", action="store_true",
-                   help="Also spawn each server and scan live tool "
-                        "descriptions (executes server binaries).")
+                   help="Also launch each stdio server and scan its live tool "
+                        "descriptions. This EXECUTES the servers: it lists "
+                        "them first, and skips the ones with critical "
+                        "findings unless --probe-critical is given, and the "
+                        "ones from project config files in the current "
+                        "directory unless --probe-project is given.")
+    p.add_argument("--probe-critical", action="store_true",
+                   help="With --deep: also launch servers that have critical "
+                        "findings (skipped by default: launching one runs "
+                        "the very command that was flagged).")
+    p.add_argument("--probe-project", action="store_true",
+                   help="With --deep: also launch servers that come from "
+                        "project config files found in the current directory "
+                        "(.mcp.json, .cursor/mcp.json, .vscode/, .devin/, "
+                        ".zed/settings.json). Skipped by default: whoever "
+                        "wrote the project, say a repository you have just "
+                        "cloned, chose the commands. Servers from your home "
+                        "directory and from a --config you name are launched.")
     p.add_argument("--format", choices=("human", "json", "sarif"),
                    default="human")
     p.add_argument("--fix", action="store_true",
-                   help="List servers launched via a downloader/shell or "
+                   help="List the servers launched via a downloader/shell or "
                         "curl|sh (critical suspicious-command / pipe-to-shell)"
-                        " that --remove would delete. Dry run on its own.")
+                        " that --remove would delete, with what each one "
+                        "runs. Dry run on its own.")
     p.add_argument("--remove", action="store_true",
-                   help="With --fix: actually remove those servers, after "
-                        "backing up each config.")
+                   help="With --fix: remove those servers. Shows what it will "
+                        "remove and asks first (with no terminal to ask on it "
+                        "refuses unless --yes is given); backs up each "
+                        "config before rewriting it.")
+    p.add_argument("--yes", action="store_true",
+                   help="With --fix --remove: do not ask for confirmation.")
     p.add_argument("--online", action="store_true",
                    help="Also query OSV (api.osv.dev) for pinned npx/uvx "
                         "packages. Sends package names and versions.")
     p.add_argument("--fail-on", choices=("critical", "high", "medium", "low"),
                    default=None,
-                   help="Exit non-zero if any finding at/above this severity.")
+                   help="Exit 1 if any finding is at/above this severity; exit "
+                        "2 instead of passing if a config file could not be "
+                        "audited (unparseable, too large...).")
     return p
 
 
@@ -275,12 +619,45 @@ def _closed_pipe_tolerant():
             sys.stdout, sys.stderr = real
 
 
+def _origin(exc: BaseException) -> str:
+    """Where an exception came from, as "file.py:123": the innermost frame
+    inside mcp_audit, else the innermost frame there is. Never its message,
+    which can quote the config that was being audited."""
+    package = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    frames = []
+    tb = exc.__traceback__
+    while tb is not None:
+        frames.append((tb.tb_frame.f_code.co_filename, tb.tb_lineno))
+        tb = tb.tb_next
+    ours = [f for f in frames if os.path.abspath(f[0]).startswith(package)]
+    path, line = (ours or frames or [("?", 0)])[-1]
+    return f"{os.path.basename(path)}:{line}"
+
+
+def _crash(exc: Exception) -> int:
+    """An internal error is exit status 2 - the audit did not happen; 1
+    means "findings" - named by its class and the line it came from, and
+    never by its message or traceback (both can quote the config).
+    MCP_AUDIT_DEBUG=1 turns that off for whoever debugs mcp-audit."""
+    if os.environ.get("MCP_AUDIT_DEBUG"):
+        raise exc
+    _note(f"error: internal error ({type(exc).__name__} at {_origin(exc)}). "
+          "This is a bug in mcp-audit, not a finding in your configs; no "
+          "audit result was produced, so this run is not a clean bill of "
+          "health. Set MCP_AUDIT_DEBUG=1 to see the traceback (it can quote "
+          "your config: read it before you share it).")
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     _harden_streams()
     # `mcp-audit | head -1` must neither traceback nor change the exit code
     # (the exit code is the verdict).
     with _closed_pipe_tolerant():
-        return _main(argv)
+        try:
+            return _main(argv)
+        except Exception as e:  # SystemExit and Ctrl-C are not Exceptions
+            return _crash(e)
 
 
 def _main(argv: list[str] | None) -> int:
@@ -288,75 +665,88 @@ def _main(argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
     if args.remove and not args.fix:
         parser.error("--remove only works together with --fix")
+    if args.yes and not (args.fix and args.remove):
+        parser.error("--yes only works together with --fix --remove")
+    if args.probe_critical and not args.deep:
+        parser.error("--probe-critical only works together with --deep")
+    if args.probe_project and not args.deep:
+        parser.error("--probe-project only works together with --deep")
+    try:
+        advisories = detectors.load_advisories()
+    except detectors.AdvisoryFeedError as e:
+        # A scanner without its feed would call vulnerable packages clean.
+        _note(f"error: {e}; refusing to report results without it")
+        return 2
     if args.config:
         for path in args.config:
             err = _explicit_config_error(path)
             if err is not None:
-                sys.stderr.write(
-                    f"[mcp-audit] error: cannot read --config file "
-                    f"'{path}': {err}\n")
+                _note(f"error: cannot read --config file '{path}': {err}")
                 return 2
     discovered, warnings = discovery.discover(args.config)
     if args.config and warnings:
         # Fail closed: an explicit --config that exists but can't be parsed
         # or understood must never report "clean" (exit 0).
         for w in warnings:
-            sys.stderr.write(
-                f"[mcp-audit] error: cannot audit --config "
-                f"'{w['path']}': {w['reason']}\n")
+            _note(f"error: cannot audit --config '{w['path']}': "
+                  f"{w['reason']}")
         return 2
-    advisories = detectors.load_advisories()
 
-    results = []
-    for d in discovered:
-        for name, cfg in d["servers"].items():
-            results.append(_audit_one(name, cfg, d["client"], d["path"],
-                                      args.deep, advisories, args.online))
+    results = _audit_all(discovered, advisories, args.online)
 
+    fix_failed = False
     if args.fix:
-        for a in _apply_fix(results, remove=args.remove):
-            sys.stderr.write(f"[mcp-audit] {a}\n")
+        stop, fix_failed = _run_fix(results, args.remove, args.yes)
+        if stop is not None:
+            return stop
         # re-audit so the report reflects reality
         discovered, warnings = discovery.discover(args.config)
-        results = []
-        for d in discovered:
-            for name, cfg in d["servers"].items():
-                results.append(_audit_one(name, cfg, d["client"], d["path"],
-                                          args.deep, advisories, args.online))
+        results = _audit_all(discovered, advisories, args.online)
 
+    if args.deep:  # after --fix: once, and never a server --fix just removed
+        _deep_pass(results, args.probe_critical, args.probe_project)
+
+    # Names, paths and project directories come from the config files: what
+    # is printed has its control and bidi characters spelled out (sanitize),
+    # whatever the format.
     if args.format == "sarif":
-        print(json.dumps(scoring.render_sarif(results, __version__), indent=2))
+        print(json.dumps(redact.sanitize_tree(
+            scoring.render_sarif(results, __version__)), indent=2))
     elif args.format == "json":
         out = {"results": [{k: r[k] for k in
-                            ("name", "client", "path", "findings",
-                             "score", "grade")} for r in results],
+                            ("name", "client", "path", "project", "findings",
+                             "score", "grade") if k in r} for r in results],
                "summary": scoring.summarize(results),
                "warnings": warnings}
-        print(json.dumps(out, indent=2))
+        print(json.dumps(redact.sanitize_tree(out), indent=2))
     if args.format != "human":
         if args.format == "sarif":
             for w in warnings:  # JSON carries these inline; SARIF can't
-                sys.stderr.write(f"[mcp-audit] warning: skipped {w['path']} "
-                                 f"<{w['client']}>: {w['reason']}\n")
+                _note(f"warning: skipped {w['path']} <{w['client']}>: "
+                      f"{w['reason']}")
         if not discovered:
-            sys.stderr.write(
-                "[mcp-audit] warning: no MCP configs discovered — this is "
-                "not a clean bill of health\n")
+            _note("warning: no MCP configs discovered — this is not a "
+                  "clean bill of health")
     else:
         print(scoring.render_human(results, warnings=warnings,
                                    n_configs=len(discovered),
                                    configs=discovered))
-        if args.deep:
-            sys.stderr.write(
-                "[mcp-audit] --deep executes server binaries; only probe "
-                "servers you already trust enough to launch.\n")
 
+    if fix_failed:
+        return 2
     if args.fail_on:
         threshold = _SEV_RANK[args.fail_on]
         for r in results:
             for f in r["findings"]:
                 if _SEV_RANK.get(f["severity"], 0) >= threshold:
                     return 1
+        if warnings:
+            # A config that could not be audited might have held anything, so
+            # a gate that passes here would be lying.
+            _note(f"error: --fail-on: {len(warnings)} config file(s) could "
+                  "not be audited (see the warnings), so a pass cannot be "
+                  "promised")
+            return 2
     return 0
 
 

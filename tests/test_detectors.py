@@ -176,6 +176,22 @@ class TestStaticDetectors(unittest.TestCase):
         self.assertEqual(len(f), 1)
         self.assertIn("API_KEY", f[0]["message"])
 
+    def test_secret_env_flags_every_word_the_readme_lists(self):
+        # README: a variable whose name has a TOKEN, KEY, SECRET, PASSWORD,
+        # PASSPHRASE, CREDENTIAL, BEARER, COOKIE, DSN or PAT word. (`*_KEY`
+        # used to slip through: OPENAI_KEY was reported clean.)
+        def flagged(name):
+            cfg = {"command": "node", "args": ["a.js"], "env": {name: "x"}}
+            return bool(detectors.detect_secret_env("s", cfg))
+        for name in ("AUTH_TOKEN", "OPENAI_KEY", "STRIPE_SECRET_KEY", "KEY",
+                     "apiKey", "CLIENT_SECRET", "DB_PASSWORD", "SSH_PASSPHRASE",
+                     "AWS_CREDENTIALS", "BEARER", "SESSION_COOKIE",
+                     "SENTRY_DSN", "GITHUB_PAT", "accessToken"):
+            self.assertTrue(flagged(name), name)
+        for name in ("PUBLIC_KEY", "KEYBOARD_LAYOUT", "MONKEY", "PATH",
+                     "NODE_ENV", "PORT"):
+            self.assertFalse(flagged(name), name)
+
     def test_nasty_server_scores_f(self):
         from mcp_audit import scoring
         findings = detectors.audit_server("evil-pipe",

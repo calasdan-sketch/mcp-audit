@@ -1,0 +1,4 @@
+include LICENSE README.md
+include mcp_audit/advisories.json
+recursive-include tests *.py *.json
+global-exclude __pycache__ *.py[cod]

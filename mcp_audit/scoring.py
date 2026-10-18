@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+from . import redact
+
 DEDUCTIONS = {"critical": 40, "high": 20, "medium": 10, "low": 5}
 
 # Report glyphs and their ASCII stand-ins. A Windows console or pipe often
@@ -67,15 +69,23 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
     client with nothing installed reads as exactly that, not as skipped.
     When zero configs were discovered the report says so plainly — a
     confident "no findings" is never emitted for unscanned configs.
+
+    Names, paths and messages come from the configs being audited. Each is
+    sanitized where it is placed in the report: a control or bidi character
+    in one is spelled out (\\x1b), and a line break in a name cannot start a
+    line of its own and fake a result. The finished report is sanitized
+    again as a backstop.
     """
+    s = redact.sanitize
     warnings = warnings or []
     rule = sym("─")
     lines = ["", f"{rule * 2} mcp-audit {rule * 39}"]
     for w in warnings:
-        lines.append(f"  [!] skipped {w['path']} <{w['client']}>: {w['reason']}")
+        lines.append(f"  [!] skipped {s(w['path'])} <{s(w['client'])}>: "
+                     f"{s(w['reason'])}")
     for c in configs or []:
         if not c.get("servers"):
-            lines.append(f"  [i] {c['path']} <{c['client']}>: "
+            lines.append(f"  [i] {s(c['path'])} <{s(c['client'])}>: "
                          "0 servers configured")
     if not results:
         if n_configs == 0:
@@ -84,17 +94,20 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
         else:
             lines.append("  no MCP servers found in audited configs.")
         lines.append(rule * 50)
-        return "\n".join(lines)
+        return redact.sanitize_report("\n".join(lines))
     for r in sorted(results, key=lambda x: x["score"]):
         lines.append("")
-        lines.append(f"  [{r['grade']}] {r['name']}  ({r['score']}/100)  <{r['client']}>")
-        lines.append(f"        {r['path']}")
+        lines.append(f"  [{r['grade']}] {s(r['name'])}  ({r['score']}/100)  "
+                     f"<{s(r['client'])}>")
+        lines.append(f"        {s(r['path'])}" + (
+            f"  (project: {s(r['project'])})" if "project" in r else ""))
         if not r["findings"]:
             lines.append(f"        {sym('✓')} no findings")
             continue
         for f in sorted(r["findings"],
                         key=lambda x: _SEV_ORDER.get(x["severity"], 9)):
-            lines.append(f"        [{f['severity'].upper():8}] {f['message']}")
+            lines.append(f"        [{f['severity'].upper():8}] "
+                         f"{s(f['message'])}")
     s = summarize(results)
     lines += ["",
               f"  {s['servers']} servers {sym('·')} {s['findings']} findings "
@@ -105,7 +118,7 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
                      f"existed but were not audited {sym('—')} results are "
                      "not a clean bill of health.")
     lines.append(rule * 50)
-    return "\n".join(lines)
+    return redact.sanitize_report("\n".join(lines))
 
 
 _SARIF_LEVEL = {"critical": "error", "high": "error",
@@ -134,7 +147,9 @@ def render_sarif(results: list[dict], version: str) -> dict:
                 "locations": [{"physicalLocation": {
                     "artifactLocation": {"uri": uri}}}],
                 "properties": {"severity": f["severity"],
-                               "server": r["name"], "client": r["client"]},
+                               "server": r["name"], "client": r["client"],
+                               **({"project": r["project"]}
+                                  if "project" in r else {})},
             })
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",

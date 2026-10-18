@@ -165,7 +165,7 @@ class TestCLI(unittest.TestCase):
             shutil.copy(os.path.join(FIX, "nasty.json"), cfg_path)
             with redirect_stdout(io.StringIO()):
                 code = cli_main(["--config", cfg_path, "--fix", "--remove",
-                                 "--format", "json"])
+                                 "--yes", "--format", "json"])
             self.assertEqual(code, 0)
             with open(cfg_path) as f:
                 data = json.load(f)
@@ -485,22 +485,19 @@ class TestDiscoveryExpansion(unittest.TestCase):
                                 for f in leaky[0]["findings"]))
             self.assertEqual(out["warnings"], [])
 
-    def test_zed_context_servers_warns_unsupported(self):
-        # Zed's path is discovered but its shape is deliberately NOT parsed:
-        # guessing field mappings would risk clean bills on unscanned servers.
-        if "zed" not in [c for c, _ in discovery.candidate_paths()]:
-            self.skipTest("zed discovery not implemented on this platform")
+    def test_zed_context_servers_are_audited(self):
+        # Zed keeps its servers under "context_servers" (flat
+        # {command, args, env}, or the older nested command.path form that
+        # this fixture uses); both reach the detectors in the common shape.
         with _isolated_machine() as (home, cwd):
             _plant_fixture("zed/settings.json", _client_path("zed"))
             found, warnings = discovery.discover()
-            self.assertEqual(
-                [d for d in found if d["client"] == "zed"], [])
-            self.assertEqual(len(warnings), 1)
-            self.assertEqual(warnings[0]["client"], "zed")
-            self.assertIn("unsupported", warnings[0]["reason"])
-            # the server inside context_servers must NOT be silently audited
-            names = [n for d in found for n in d["servers"]]
-            self.assertNotIn("some-server", names)
+            self.assertEqual(warnings, [])
+            (zed,) = [d for d in found if d["client"] == "zed"]
+            self.assertEqual(set(zed["servers"]), {"some-server"})
+            self.assertEqual(zed["servers"]["some-server"]["command"], "npx")
+            self.assertEqual(zed["servers"]["some-server"]["args"],
+                             ["-y", "some-server"])
 
     def test_zed_without_context_servers_is_known_empty(self):
         # A Zed settings.json with no context_servers key means no Zed MCP
@@ -652,8 +649,7 @@ class TestDiscoveryRoots(unittest.TestCase):
             with unittest.mock.patch.dict(os.environ,
                                           {discovery.HOME_ENV: fake}):
                 home_paths = [p for c, p in discovery.candidate_paths()
-                              if c not in ("claude-code-project",
-                                           "vscode-workspace")]
+                              if c not in discovery.PROJECT_CLIENTS]
             self.assertTrue(home_paths)
             self.assertTrue(all(p.startswith(fake) for p in home_paths),
                             home_paths)
