@@ -58,16 +58,28 @@ class TestDeepScan(unittest.TestCase):
         self.assertEqual([t["name"] for t in probe["tools"]], ["t"])
 
     def test_probe_resolves_command_via_path(self):
-        # Windows shims (npx -> npx.cmd) only launch once resolved via
-        # shutil.which; simulate a bare name that only which() can find.
-        real_which = shutil.which
-        with unittest.mock.patch.object(
-                deep_mod.shutil, "which",
-                lambda c, *a, **k: sys.executable if c == "fake-npx"
-                else real_which(c, *a, **k)):
-            probe = deep_mod.probe_server(
-                {"command": "fake-npx", "args": [FAKE]})
+        # Windows shims (npx -> npx.cmd) only launch once found through PATH
+        # and PATHEXT: a bare name is looked up on the PATH the server gets.
+        bindir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bindir, True)
+        if os.name == "nt":
+            name, body = "fake-npx.cmd", '@"%s" %%*\r\n' % sys.executable
+        else:
+            name, body = "fake-npx", '#!/bin/sh\nexec "%s" "$@"\n' % (
+                sys.executable)
+        shim = os.path.join(bindir, name)
+        with open(shim, "w", newline="") as f:
+            f.write(body)
+        os.chmod(shim, 0o755)
+        probe = deep_mod.probe_server({"command": "fake-npx", "args": [FAKE],
+                                       "env": {"PATH": bindir}})
         self.assertTrue(probe["ok"], probe.get("error"))
+        elsewhere = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        probe = deep_mod.probe_server({"command": "fake-npx", "args": [FAKE],
+                                       "env": {"PATH": elsewhere}})
+        self.assertFalse(probe["ok"])
+        self.assertIn("not found on PATH", probe["error"])
 
     def test_probe_unlaunchable(self):
         probe = deep_mod.probe_server({"command": "/nope/not-here"})

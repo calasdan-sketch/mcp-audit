@@ -6,6 +6,7 @@ never sees the real machine (see isolated_machine).
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import io
 import json
@@ -18,6 +19,16 @@ from mcp_audit import cli as cli_mod
 from mcp_audit import discovery
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+# Everything the tests make in the temporary directory (their own, the fake
+# home, the empty directory --deep starts servers in) goes under one private
+# directory that is removed when the test process ends, instead of piling up
+# in the shared temporary directory. Child processes inherit it.
+_BASE = tempfile.mkdtemp(prefix="mcp-audit-tests-")
+tempfile.tempdir = _BASE
+for _var in ("TMPDIR", "TEMP", "TMP"):
+    os.environ[_var] = _BASE
+atexit.register(shutil.rmtree, _BASE, ignore_errors=True)
 
 # Environment variables the default discovery paths may consult.
 _PATH_ENV = ("XDG_CONFIG_HOME", "COPILOT_HOME")
@@ -45,13 +56,18 @@ def write_bytes(path: str, data: bytes) -> str:
 
 
 @contextlib.contextmanager
-def isolated_machine():
+def isolated_machine(chdir: bool = False):
     """Fake home, AppData and cwd so default discovery sees only what the
     test plants - on every OS and whatever the developer's own environment.
 
     Sets the documented MCP_AUDIT_HOME override plus HOME, USERPROFILE,
     APPDATA and LOCALAPPDATA, drops XDG_CONFIG_HOME and COPILOT_HOME, and
     points cwd at a second empty directory. Yields (home, cwd).
+
+    By default os.getcwd() only answers with that directory; the process stays
+    where it was. With `chdir` the process really goes there (and comes back):
+    the way to test what a child process or a lookup that does not ask
+    os.getcwd() does with the current directory.
     """
     root = tempfile.mkdtemp()
     home = os.path.join(root, "home")
@@ -62,14 +78,36 @@ def isolated_machine():
         os.makedirs(d)
     env = {discovery.HOME_ENV: home, "HOME": home, "USERPROFILE": home,
            "APPDATA": appdata, "LOCALAPPDATA": local_appdata}
+    came_from = os.getcwd()
     try:
         with unittest.mock.patch.dict(os.environ, env), \
-                unittest.mock.patch("os.getcwd", return_value=cwd):
+                (contextlib.nullcontext() if chdir else
+                 unittest.mock.patch("os.getcwd", return_value=cwd)):
             for name in _PATH_ENV:
                 os.environ.pop(name, None)
-            yield home, cwd
+            if chdir:
+                os.chdir(cwd)
+            try:
+                yield home, cwd
+            finally:
+                if chdir:
+                    os.chdir(came_from)
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def private_tempdir():
+    """Everything the code under test makes in the temp directory goes into
+    one directory of the test's own (tempfile.tempdir points there), so a test
+    can say exactly what was left behind - and nothing outlives it in the
+    shared temp directory. Yields that directory."""
+    base = tempfile.mkdtemp(prefix="mcp-audit-test-")
+    try:
+        with unittest.mock.patch.object(tempfile, "tempdir", base):
+            yield base
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def client_path(client: str) -> str:

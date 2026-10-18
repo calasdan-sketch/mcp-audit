@@ -13,6 +13,7 @@ import stat
 import sys
 import tempfile
 import time
+import traceback
 
 from . import __version__
 from . import deep as deep_mod
@@ -72,10 +73,29 @@ def _add_findings(result: dict, new: list[dict]) -> None:
 _HELD_BECAUSE = {
     "critical": ("it has critical findings, and launching it would run the "
                  "command that was flagged", "--probe-critical"),
+    "unreadable": ("the static audit could not analyze it (a check failed "
+                   "on it), so what launching it would run is not known",
+                   "--probe-critical"),
+    "url": ("it has a URL that could not be taken apart, so where it would "
+            "connect is not known", "--probe-critical"),
+    "http": ("it installs its packages from a registry over plain http, "
+             "where anyone on the way can swap what it serves",
+             "--probe-critical"),
     "project": ("it comes from a project file in the current directory, so "
                 "whoever wrote that project, say a repository you have just "
                 "cloned, chose what it would run", "--probe-project"),
 }
+
+#: The findings below critical that hold a server back too, as (check,
+#: severity or None for any, reason): each says the audit could not settle
+#: what launching the server would do. A medium finding does not: a git
+#: source, a registry over https and a bridge are how MCP servers are
+#: installed and reached.
+_HELD_FINDINGS = (
+    ("detector-error", None, "unreadable"),
+    ("unparseable-url", None, "url"),
+    ("package-registry", "high", "http"),
+)
 
 
 def _hold_reasons(result: dict, probe_critical: bool,
@@ -83,24 +103,82 @@ def _hold_reasons(result: dict, probe_critical: bool,
     """Why --deep must leave this server alone, from _HELD_BECAUSE; empty
     when it may be launched.
 
-    "critical": the static audit rated it critical. "project": it comes from
-    a file found in the current directory (discovery.PROJECT_CLIENTS), which
-    is not yours: a cloned repository names its own commands. A server that
-    would not be launched anyway (a remote one) is not held back for that:
-    it keeps its own `deep-probe` finding."""
+    "critical": the static audit rated it critical. "unreadable", "url",
+    "http": a finding below critical that says the audit could not tell what
+    launching it would do (see _HELD_FINDINGS); a server that is critical
+    already is told only that. All of these take --probe-critical.
+    "project": it comes from a file found in the current directory
+    (discovery.PROJECT_CLIENTS), which is not yours: a cloned repository
+    names its own commands. A server that would not be launched anyway (a
+    remote one) is not held back for that: it keeps its own `deep-probe`
+    finding."""
     reasons = []
-    if _has_critical(result) and not probe_critical:
-        reasons.append("critical")
+    if not probe_critical:
+        if _has_critical(result):
+            reasons.append("critical")
+        else:
+            reasons += [reason for check, severity, reason in _HELD_FINDINGS
+                        if any(f["check"] == check
+                               and severity in (None, f["severity"])
+                               for f in result["findings"])]
     if (not probe_project and discovery.is_project_client(result["client"])
             and deep_mod.not_launchable(result["config"]) is None):
         reasons.append("project")
     return reasons
 
 
+def _starts_in_the_project(result: dict) -> bool:
+    """A server from a project file (which --probe-project let through)
+    starts in the project, the current directory: the paths in a project's
+    config are written for it. Every other server starts in an empty
+    directory of its own, because the current directory may be a repository
+    you are auditing (see deep.probe_server)."""
+    return discovery.is_project_client(result["client"])
+
+
+#: What a launch fetches that nothing in the config pins, as the launch list
+#: says it - by the finding that shows it: (check, severity or None for any,
+#: words). A package that is not pinned to one release, a git source that is
+#: not pinned to a commit or a tag, and a registry other than the default
+#: are whatever the registry or the forge serves when the server starts. A
+#: bridge connects to a remote server by design.
+_FETCHES = (
+    ("floating-version", None, "downloads code"),
+    ("git-source", "medium", "downloads code"),
+    ("package-registry", None, "downloads code"),
+    ("remote-server", None, "connects to a remote server"),
+)
+
+
+def _launch_line(result: dict) -> str:
+    """One line of the list of what --deep is about to launch: where the
+    server comes from, what it runs (launch.summary: no argument is printed)
+    and, in fixed words, where it starts and what it fetches."""
+    notes = []
+    for check, severity, words in _FETCHES:
+        if words not in notes and any(
+                f["check"] == check and severity in (None, f["severity"])
+                for f in result["findings"]):
+            notes.append(words)
+    if _starts_in_the_project(result):
+        notes.append("starts in the current directory")
+    return (f"  '{result['name']}' <{result['client']}> from "
+            f"{result['path']}, runs: {launch.summary(result['config'])}"
+            + "".join("; " + words for words in notes))
+
+
+def _off_text(result: dict, how: str) -> str:
+    """Why a switched-off server (deep.switched_off) is not launched."""
+    return f"disabled in the {result['client']} config ({how})"
+
+
 def _held_text(reasons: list[str]) -> str:
     """The reasons, and what it takes to launch the server anyway."""
     why = "; and ".join(_HELD_BECAUSE[r][0] for r in reasons)
-    flags = [_HELD_BECAUSE[r][1] for r in reasons]
+    flags = []
+    for r in reasons:
+        if _HELD_BECAUSE[r][1] not in flags:
+            flags.append(_HELD_BECAUSE[r][1])
     if len(flags) == 1:
         return f"{why} ({flags[0]} launches it anyway)"
     return f"{why} (it takes {' and '.join(flags)} to launch it)"
@@ -113,41 +191,60 @@ def _deep_pass(results: list[dict], probe_critical: bool,
 
     Launching runs the commands in the configs, with the user's rights, so
     this says what it is about to launch BEFORE it launches anything. It
-    leaves alone the servers the static audit rated critical (launching one
-    runs the very command that was flagged) unless `probe_critical` is set,
-    and the servers that come from a project file in the current directory
-    (whoever wrote the project chose their commands: think of a repository
-    you have just cloned) unless `probe_project` is set. A server that is
-    left alone, or cannot be probed, gets a low `deep-probe` finding: --deep
-    never reports a server as read when it was not.
+    leaves alone the servers the static audit rated critical or could not
+    settle (see _HELD_FINDINGS) unless `probe_critical` is set, and the
+    servers that come from a project file in the current directory (whoever
+    wrote the project chose their commands: think of a repository you have
+    just cloned) unless `probe_project` is set. It skips the entries that
+    switch themselves off (`"disabled": true`, `"enabled": false`), which no
+    flag launches. A server that is left alone, skipped, or cannot be
+    probed, gets a low `deep-probe` finding: --deep never reports a server as
+    read when it was not.
 
     A signal that ends mcp-audit while a server runs (Ctrl-C, SIGTERM,
     SIGHUP) stops the server first and ends the run: deep_mod.Interrupted
     comes out of here and main() answers it. There is no report then."""
-    holds = {id(r): _hold_reasons(r, probe_critical, probe_project)
+    off = {}    # the entries that switch themselves off, and how
+    for r in results:
+        how = deep_mod.switched_off(r["config"])
+        if how and deep_mod.not_launchable(r["config"]) is None:
+            off[id(r)] = how
+    holds = {id(r): [] if id(r) in off
+             else _hold_reasons(r, probe_critical, probe_project)
              for r in results}
     held_back = {i for i, reasons in holds.items() if reasons}
     launching = {id(r) for r in results
-                 if id(r) not in held_back
+                 if id(r) not in held_back and id(r) not in off
                  and deep_mod.not_launchable(r["config"]) is None}
     if launching:
         _note(f"--deep will now LAUNCH {len(launching)} MCP server(s) on this "
               "machine, with your user rights, and talk to them over stdio. "
               "A server can do anything you can: only go on if you would "
-              "run these yourself. Arguments are counted, not printed (any "
-              "of them can be a credential): read them in the config file "
-              "named on each line.")
+              "run these yourself. Each one starts in an empty temporary "
+              "directory (removed afterwards) unless its line says it starts "
+              "in the current directory, and its program is looked up on "
+              "PATH only. Arguments are counted, not printed (any of them "
+              "can be a credential): read them in the config file named on "
+              "each line.")
         for r in results:
             if id(r) in launching:
-                _note(f"  '{r['name']}' <{r['client']}> from {r['path']}, "
-                      f"runs: {launch.summary(r['config'])}")
+                _note(_launch_line(r))
     for r in results:
         if id(r) in held_back:
             _note(f"--deep leaves '{r['name']}' <{r['client']}> from "
                   f"{r['path']} alone: {_held_text(holds[id(r)])}")
+        if id(r) in off:
+            _note(f"--deep skips '{r['name']}' <{r['client']}> from "
+                  f"{r['path']}: {_off_text(r, off[id(r)])}")
     sys.stderr.flush()
     with deep_mod.stop_on_signals():
         for r in results:
+            if id(r) in off:
+                _add_findings(r, [{
+                    "severity": "low", "check": "deep-probe",
+                    "message": "--deep did not launch this server: "
+                               + _off_text(r, off[id(r)])}])
+                continue
             if id(r) in held_back:
                 _add_findings(r, [{
                     "severity": "low", "check": "deep-probe",
@@ -156,12 +253,15 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                 continue
             if id(r) in launching:
                 _note(f"probing '{r['name']}'...")
-            probe = deep_mod.probe_server(r["config"])
+            probe = deep_mod.probe_server(
+                r["config"],
+                cwd=os.getcwd() if _starts_in_the_project(r) else None)
             new: list[dict] = []
             if probe["ok"]:
                 r["tools"] = probe["tools"]
                 r["deep_read"] = len(probe["tools"])
-                new += deep_mod.audit_descriptions(probe["tools"])
+                new += deep_mod.audit_descriptions(probe["tools"],
+                                                   probe.get("server"))
             if probe.get("error"):
                 new.append({"severity": "low", "check": "deep-probe",
                             "message": f"--deep probe: {probe['error']}"})
@@ -481,21 +581,30 @@ def _build_parser() -> argparse.ArgumentParser:
                    version=f"%(prog)s {__version__}")
     p.add_argument("--deep", action="store_true",
                    help="Also launch each stdio server and scan what it says "
-                        "about its tools (descriptions, titles, parameter "
-                        "descriptions) for prompt injection - a heuristic: a "
+                        "about itself and its tools (instructions, "
+                        "descriptions, titles, schema texts) for prompt "
+                        "injection - a heuristic: a "
                         "clean scan is not proof of safety. This EXECUTES the "
-                        "servers: it lists "
-                        "them first, and skips the ones with critical "
-                        "findings unless --probe-critical is given, and the "
+                        "servers: it lists them first. It skips the ones "
+                        "with critical findings or others the audit could "
+                        "not settle (--probe-critical launches them), the "
                         "ones from project config files in the current "
-                        "directory unless --probe-project is given. A signal "
+                        "directory (--probe-project launches them) and the "
+                        'ones disabled in their config ("disabled": true, '
+                        '"enabled": false; nothing launches them). Each one '
+                        "it launches starts in an empty temporary directory, "
+                        "not the one you are in, and its program is looked "
+                        "up on PATH only. A signal "
                         "that ends mcp-audit meanwhile (Ctrl-C, SIGTERM, "
                         "SIGHUP) stops the servers first and exits 128 plus "
                         "its number, with no report.")
     p.add_argument("--probe-critical", action="store_true",
-                   help="With --deep: also launch servers that have critical "
-                        "findings (skipped by default: launching one runs "
-                        "the very command that was flagged).")
+                   help="With --deep: also launch the servers the static "
+                        "audit makes it skip: those with critical findings "
+                        "(launching one runs the very command that was "
+                        "flagged), a server it could not analyze, a URL it "
+                        "could not take apart and a package registry over "
+                        "plain http.")
     p.add_argument("--probe-project", action="store_true",
                    help="With --deep: also launch servers that come from "
                         "project config files found in the current directory "
@@ -503,7 +612,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         ".zed/settings.json). Skipped by default: whoever "
                         "wrote the project, say a repository you have just "
                         "cloned, chose the commands. Servers from your home "
-                        "directory and from a --config you name are launched.")
+                        "directory and from a --config you name are launched. "
+                        "Servers from project files start in the current "
+                        "directory; all others in an empty temporary one.")
     p.add_argument("--allow-host", action="append", default=[],
                    type=_host_arg, metavar="HOST",
                    help="Trust HOST (repeatable): a remote MCP server, a "
@@ -687,14 +798,18 @@ def _crash(exc: Exception) -> int:
     """An internal error is exit status 2 - the audit did not happen; 1
     means "findings" - named by its class and the line it came from, and
     never by its message or traceback (both can quote the config).
-    MCP_AUDIT_DEBUG=1 turns that off for whoever debugs mcp-audit."""
-    if os.environ.get("MCP_AUDIT_DEBUG"):
-        raise exc
+    MCP_AUDIT_DEBUG=1 prints the traceback as well, for whoever debugs
+    mcp-audit; the exit status is 2 either way."""
+    debug = bool(os.environ.get("MCP_AUDIT_DEBUG"))
+    if debug:
+        sys.stderr.write("".join(traceback.format_exception(exc)))
     _note(f"error: internal error ({type(exc).__name__} at {_origin(exc)}). "
           "This is a bug in mcp-audit, not a finding in your configs; no "
           "audit result was produced, so this run is not a clean bill of "
-          "health. Set MCP_AUDIT_DEBUG=1 to see the traceback (it can quote "
-          "your config: read it before you share it).")
+          "health."
+          + ("" if debug else
+             " Set MCP_AUDIT_DEBUG=1 to see the traceback (it can quote "
+             "your config: read it before you share it)."))
     return 2
 
 

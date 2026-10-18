@@ -532,8 +532,19 @@ class TestNothingEscapesAsATraceback(unittest.TestCase):
 
     def test_the_debug_variable_gives_the_traceback_to_whoever_debugs(self):
         with unittest.mock.patch.dict(os.environ, {"MCP_AUDIT_DEBUG": "1"}):
-            with self.assertRaises(RuntimeError):
-                self.crash(RuntimeError("x"))
+            code, out, err = self.crash(RuntimeError("x"))
+        self.assertIn("Traceback (most recent call last)", err)
+        self.assertIn("RuntimeError: x", err)
+        self.assertEqual(out, "")
+
+    def test_the_debug_variable_does_not_change_the_exit_status(self):
+        # 1 means findings (the README says so): a bug is 2 with the
+        # traceback as well as without it
+        for debug in ({}, {"MCP_AUDIT_DEBUG": "1"}):
+            with unittest.mock.patch.dict(os.environ, debug):
+                code, out, err = self.crash(RuntimeError("x"))
+            self.assertEqual(code, 2, debug)
+            self.assertIn("bug in mcp-audit", err)
 
     def test_a_deliberate_exit_still_exits_that_way(self):
         with self.assertRaises(SystemExit) as cm:

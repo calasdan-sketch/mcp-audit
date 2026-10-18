@@ -27,6 +27,15 @@ SEVERITIES = ("critical", "high", "medium", "low")
 URL_RE = re.compile(r"(?:https?|wss?):[/\\]+[^\s'\"<>/\\][^\s'\"<>]*",
                     re.IGNORECASE)
 _START_RE = re.compile(r"(?:https?|wss?):[/\\]+", re.IGNORECASE)
+# Where the URL starts in a text a program is handed whole: at its start, or
+# after the "@" of a package spec (`name @ URL`, `name@URL`), and after the
+# version-control prefix of a repository (`git+URL`). pip, uv and npm read the
+# URL that is left; the rest is what they call the package or the kind of
+# repository. It is the first "@" that a URL follows: `@scope/name@URL` has
+# two.
+_SPEC_URL_RE = re.compile(
+    r"(?:^|@)[\x00-\x20]*(?:(?:git|hg|svn|bzr)\+)?(?=(?:https?|wss?):[/\\])",
+    re.IGNORECASE)
 _MAX_JSON_ARG = 1_000_000
 # Bare IPv4:port callbacks ("203.0.113.9:4444") not already part of a URL.
 IP_PORT_RE = re.compile(r"(?<![\w./:])(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})\b")
@@ -282,13 +291,18 @@ def _json_strings(text: str) -> "list[str]":
 def _values(text: str) -> "list[str]":
     """The strings in `text` that a program would parse whole as a URL: the
     text itself (an argument, an env value), what follows its first "="
-    (`--url=...`, `KEY=...`) and, when it is JSON, every string in it. Only
-    those that start like a URL."""
+    (`--url=...`, `KEY=...`) and, when it is JSON, every string in it - and in
+    each of those, what a package spec leaves of it as the URL: what follows
+    `name @` or `name@` and a version-control prefix (`git+`). Only those
+    that start like a URL."""
     out: list[str] = []
     for cand in (text, text.partition("=")[2], *_json_strings(text)):
         cand = cand.translate(urls.DROPPED).strip(urls.C0_AND_SPACE)
-        if _START_RE.match(cand) and cand not in out:
-            out.append(cand)
+        found = _SPEC_URL_RE.search(cand)
+        if found:
+            cand = cand[found.end():]
+            if cand not in out:
+                out.append(cand)
     return out
 
 
@@ -357,25 +371,80 @@ def detect_exfiltration(name: str, cfg: dict, allow_hosts=()) -> list[dict]:
         if found is not None:
             judged.setdefault(role.value, []).extend(found)
     for where, text in _units(cfg):
-        for value, found in judged.items():
-            text, hit = _mask(text, value)
-            if hit:
-                findings.extend(f for f in found if f not in findings)
-        for kind, shown in _endpoints(text, allow_hosts):
-            if kind == "unparseable":
-                findings.append(_unparseable_url(where))
-                continue
-            if kind == "ambiguous":
-                findings.append(_ambiguous_url(where))
-                continue
-            # A remote endpoint baked into launch args is critical. In env it
-            # is usually service config (API base URLs), so medium: worth a
-            # look, not a verdict. Well-known API hosts are not reported.
-            sev = "medium" if where.startswith("env:") else "critical"
-            findings.append(_finding(
-                sev, "exfiltration-endpoint",
-                f"remote endpoint in {where}: {shown}"))
+        findings.extend(_unit_findings(where, text, judged, allow_hosts,
+                                       findings))
+    # A script is read as it is written above, and a quote ends a URL there.
+    # The shell takes the quotes out (`ht''tps://''host` is `https://host`),
+    # so the words it hands over are read as well - and what was found
+    # already is not found twice.
+    words, complete = _script_urls(cfg)
+    known = {(f["severity"], f["check"], f["message"]) for f in findings}
+    for text in words:
+        for f in _unit_findings("args", text, judged, allow_hosts, findings):
+            key = (f["severity"], f["check"], f["message"])
+            if key not in known:
+                known.add(key)
+                findings.append(f)
+    if not complete:
+        findings.append(_finding(
+            "high", "detector-error",
+            f"could not analyze URLs and endpoints (a launch script holds "
+            f"more than {_MAX_SCRIPT_URLS} different URLs); treat this "
+            "server as unaudited"))
     return findings
+
+
+#: The most different URL-like words of a script that are read once the shell
+#: has handed them over. A real script has a handful; a hostile one can have
+#: as many as it has characters, and past this many the entry is reported as
+#: unaudited rather than read on (or passed as clean).
+_MAX_SCRIPT_URLS = 2000
+
+
+def _script_urls(cfg: dict) -> "tuple[list[str], bool]":
+    """The words of the commands a shell script runs that look like a URL
+    once the shell has handed them over - each once - and whether that is all
+    of them. (The arguments of the entry itself are not run through a shell:
+    the program is handed them as they are.)"""
+    try:
+        words = _scan_launch(cfg).words
+    except _TooComplex:
+        return [], True   # detect_suspicious_command reports that
+    out: "dict[str, None]" = {}
+    for word in words:
+        if word in out or not _START_RE.search(word):
+            continue
+        if len(out) >= _MAX_SCRIPT_URLS:
+            return list(out), False
+        out[word] = None
+    return list(out), True
+
+
+def _unit_findings(where: str, text: str, judged: "dict[str, list[dict]]",
+                   allow_hosts, findings: "list[dict]") -> "list[dict]":
+    """The findings of one piece of text of the entry (`where` it is): those
+    of the values that get a verdict of their own and stand in it, and one
+    for each remote endpoint left. `findings`: what there is already."""
+    new: "list[dict]" = []
+    for value, found in judged.items():
+        text, hit = _mask(text, value)
+        if hit:
+            new.extend(f for f in found if f not in findings and f not in new)
+    for kind, shown in _endpoints(text, allow_hosts):
+        if kind == "unparseable":
+            new.append(_unparseable_url(where))
+            continue
+        if kind == "ambiguous":
+            new.append(_ambiguous_url(where))
+            continue
+        # A remote endpoint baked into launch args is critical. In env it
+        # is usually service config (API base URLs), so medium: worth a
+        # look, not a verdict. Well-known API hosts are not reported.
+        sev = "medium" if where.startswith("env:") else "critical"
+        new.append(_finding(
+            sev, "exfiltration-endpoint",
+            f"remote endpoint in {where}: {shown}"))
+    return new
 
 
 def _remote_server(url: str, allow=(), via: str = "",
@@ -718,6 +787,9 @@ class _Launch:
         self.inline: "list[tuple[str, list[str]]]" = []
         #: (program, args) of every plain command, i.e. not a shell wrapper
         self.launches: "list[tuple[str, list[str]]]" = []
+        #: the words of every plain command inside a script, as the shell
+        #: hands them over (quotes taken out)
+        self.words: "list[str]" = []
         self.pipe = False   # something is piped into a shell
         self.eval = False   # `eval` of generated text
 
@@ -752,6 +824,8 @@ def _scan_words(out: _Launch, words: "list[str]", via: "tuple[str, ...]",
     # it is judged as the program it is.
     out.programs.append((name, via))
     out.launches.append((name, rest))
+    if via:
+        out.words.extend(words)
     if not via and _raw_pipe_to_shell(" ".join(words)):
         out.pipe = True
 
@@ -858,6 +932,10 @@ class Package(NamedTuple):
     exact: bool            # one release (or a digest): the same on every launch
     ecosystem: str         # "npm" or "PyPI"
     spec: str = ""         # the argument it was read from: "pkg@1.2.3"
+    #: False when an option mcp-audit does not know comes before it: the word
+    #: read as the package could be that option's value (a credential, say),
+    #: so it is never printed or sent anywhere (see _only_known).
+    sure: bool = True
 
     def release(self) -> "str | None":
         """The exact release number, or None when only a range, a tag or a
@@ -939,6 +1017,22 @@ _PY_VALUE_OPTS = frozenset({
     "--no-build-package", "--refresh-package", "--link-mode", "--color",
     "--allow-insecure-host", "--python-platform", "--torch-backend",
     "--spec", "--pip-args", "--python-preference"})
+#: Options that take no value, so that the word after one is the package. An
+#: option in neither this table nor the one above (and not a --no-/--skip-
+#: switch: redact.is_negation) may take a value, and then the word after it
+#: is that value and not the package.
+_NPM_FLAG_OPTS = frozenset({
+    "-y", "--yes", "-n", "--no", "-q", "--quiet", "-s", "--silent", "-d",
+    "--dd", "--ddd", "--verbose", "--prefer-offline", "--prefer-online",
+    "--offline", "--ignore-existing", "--ignore-scripts", "--legacy-peer-deps",
+    "-f", "--force", "--include-workspace-root", "-ws", "--workspaces", "-c",
+    "--call", "--shell-mode", "--bun", "-b", "--production", "-h", "--help"})
+_PY_FLAG_OPTS = frozenset({
+    "-q", "-qq", "--quiet", "-v", "-vv", "-vvv", "--verbose", "--isolated",
+    "--refresh", "--offline", "--native-tls", "--managed-python",
+    "--reinstall", "-U", "--upgrade", "--active", "--compile-bytecode",
+    "--system-site-packages", "--pypackages", "--path", "--frozen",
+    "--locked", "--exact", "--preview", "-h", "--help"})
 _NPM_RUNNERS = frozenset({"npx", "bunx", "pnpx"})
 #: (tool, subcommand) pairs that fetch and run a package like npx does.
 _NPM_VIA = frozenset({("pnpm", "dlx"), ("yarn", "dlx"), ("npm", "exec"),
@@ -974,26 +1068,39 @@ def _split_runner_args(args: "list[str]", value_opts) -> tuple:
     return opts, (args[i] if i < n else None)
 
 
+def _only_known(opts: "list[tuple[str, str | None]]", flag_opts) -> bool:
+    """True when the word after `opts` can be taken for the package: each
+    option came with its value (`--opt=value`, or an option of the tables that
+    takes one) or is a switch (in `flag_opts`, or a --no-/--skip- option). An
+    option that is none of these might take the next word as its value, and
+    then that word is a value - a credential, say - and not the package."""
+    return all(value is not None or opt in flag_opts
+               or redact.is_negation(opt) for opt, value in opts)
+
+
 def _npm_packages(args: "list[str]", call_is_command: bool
                   ) -> "list[Package]":
     """call_is_command: `-c` hands the runner a command string (npx, npm
     exec) and so runs no package; for pnpm and bun it is only a flag."""
     opts, positional = _split_runner_args(args, _NPM_VALUE_OPTS)
-    specs = [v for o, v in opts if o in ("-p", "--package") and v]
+    specs = [(v, True) for o, v in opts if o in ("-p", "--package") and v]
     called = call_is_command and any(o in ("-c", "--call") for o, _ in opts)
     if not specs and positional and not called:
-        specs = [positional]
-    return [p for p in map(_npm_package, specs) if p]
+        specs = [(positional, _only_known(opts, _NPM_FLAG_OPTS))]
+    return [p._replace(sure=sure) for p, sure in
+            ((_npm_package(spec), sure) for spec, sure in specs) if p]
 
 
 def _py_packages(args: "list[str]", spec_opt: str = "--from"
                  ) -> "list[Package]":
     opts, positional = _split_runner_args(args, _PY_VALUE_OPTS)
     froms = [v for o, v in opts if o == spec_opt and v]
-    main = froms[0] if froms else positional
-    specs = ([main] if main else []) + [v for o, v in opts
-                                        if o == "--with" and v]
-    return [p for p in map(_py_package, specs) if p]
+    main = (froms[0], True) if froms else (
+        positional, _only_known(opts, _PY_FLAG_OPTS))
+    specs = ([main] if main[0] else []) + [(v, True) for o, v in opts
+                                           if o == "--with" and v]
+    return [p._replace(sure=sure) for p, sure in
+            ((_py_package(spec), sure) for spec, sure in specs) if p]
 
 
 class _Runner(NamedTuple):
@@ -1292,7 +1399,14 @@ def detect_floating_version(name: str, cfg: dict) -> list[dict]:
             continue
         hint = (f"{p.name}==x.y.z" if p.ecosystem == "PyPI"
                 else f"{p.name}@x.y.z")
-        if p.version is None:
+        if not p.sure:
+            # (the word may be the value of an option, so it is not quoted)
+            msg = ("package not shown: an option mcp-audit does not know "
+                   "comes before it, so its name cannot be told from that "
+                   "option's value. If it is not pinned to one release, every "
+                   "launch can pull a different (possibly compromised) one: "
+                   "pin it with name@x.y.z")
+        elif p.version is None:
             msg = (f"unpinned package '{p.name}' — every launch can pull "
                    "a different (possibly compromised) release; pin with "
                    f"{hint}")
@@ -1394,7 +1508,7 @@ def detect_osv(name: str, cfg: dict, timeout: float = 10) -> list[dict]:
     findings = []
     for p in _iter_packages(cfg):
         pkg, ver, eco = p.name, p.release(), p.ecosystem
-        if not ver:  # a range or a tag: nothing exact to look up
+        if not ver or not p.sure:  # a range, a tag - or maybe not a package
             continue
         body = json.dumps({"package": {"name": pkg, "ecosystem": eco},
                            "version": ver}).encode()

@@ -208,6 +208,14 @@ def takes_a_credential(option: str) -> bool:
         option)
 
 
+def is_negation(option: str) -> bool:
+    """True for an option that switches something off (--no-cache,
+    --skip-auth, --without-x, --disable-y): by habit a switch, which takes no
+    value."""
+    words = [w.upper() for w in _WORD_RE.findall(str(option))]
+    return bool(words) and words[0] in _NEGATIONS
+
+
 # -- the value that follows the name of a credential ---------------------------
 #
 # Free text that reaches an output can quote a command line (a finding, a

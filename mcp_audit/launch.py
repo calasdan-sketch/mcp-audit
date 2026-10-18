@@ -11,10 +11,13 @@ never printed. What is printed has a fixed shape that cannot carry one:
   s.js` runs node);
 * the package an npx/uvx-style launcher fetches (`some-server@1.2.3`), the
   script it starts (`server.js`) or the module (`-m mcp_server_fetch`), when
-  it is plainly one;
+  it is plainly one (after an option that mcp-audit does not know, the word
+  that looks like the package could be the option's value: the line says
+  `(package not shown)` instead);
 * how many arguments were left out;
 * the host of every http(s)/ws(s) URL in them, as everywhere else
-  (`scheme://host[:port]`, then `/...` if anything followed).
+  (`scheme://host[:port]`, then `/...` if anything followed) - in a shell
+  script also the URLs as the shell hands them over (`https://''host`).
 
 The config file named next to it has the rest.
 """
@@ -88,9 +91,14 @@ def _name(word: str) -> str:
 def _target(program: str, args: "list[str]"
             ) -> "tuple[str, list[str]] | None":
     """(what to show, the arguments it is made of) for the package, module or
-    script a launch starts, if it is plainly one."""
+    script a launch starts, if it is plainly one. A package that follows an
+    option mcp-audit does not know could be that option's value, a credential
+    perhaps: it is not shown ("(package not shown)", made of no argument)."""
+    unsure = False
     for package in detectors._packages_of(program, args):
-        if _SPEC_RE.fullmatch(package.spec):
+        if not package.sure:
+            unsure = True
+        elif _SPEC_RE.fullmatch(package.spec):
             return package.spec, [package.spec]
     if _PYTHON_RE.fullmatch(program):
         for i, arg in enumerate(args[:-1]):
@@ -102,7 +110,7 @@ def _target(program: str, args: "list[str]"
         if (not arg.startswith("-") and len(arg) <= _MAX_SCRIPT
                 and _SCRIPT_RE.fullmatch(arg)):
             return arg, [arg]
-    return None
+    return ("(package not shown)", []) if unsure else None
 
 
 def _url_text(raw: str) -> str:
@@ -140,6 +148,7 @@ def _summary(cfg) -> str:
             {"command": command, "args": words}).launches
     except detectors._TooComplex:
         launches = []
+    spliced, _ = detectors._script_urls({"command": command, "args": words})
     launches = launches or [(own, words)]
     program, largs = launches[0]
     shown = None
@@ -169,7 +178,7 @@ def _summary(cfg) -> str:
     if hidden:
         line += " (+%d argument%s not shown)" % (hidden,
                                                   "" if hidden == 1 else "s")
-    links = _urls_in(words + [command])
+    links = _urls_in(words + [command] + spliced)
     if links:
         more = len(links) - _MAX_URLS
         line += "; URL%s: %s%s" % (

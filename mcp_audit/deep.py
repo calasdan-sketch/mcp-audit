@@ -15,6 +15,12 @@ anything, and leaves out servers that have critical static findings unless
   and the whole tree is killed when the probe ends, however it ends - a
   signal that ends mcp-audit itself (Ctrl-C, SIGTERM, SIGHUP) included: see
   stop_on_signals;
+* it starts in an empty directory of its own (private, in the temp directory,
+  removed afterwards) unless the caller names one, and its program is looked
+  up on PATH only: see _find_program. The directory mcp-audit was run from
+  is the one a clone you are auditing fills, and the one Windows searches
+  first - without this, --deep run there would run the clone's files through
+  your own servers (a node_modules copy for `npx -y @acme/mcp-thing`);
 * its output is read by a thread in raw chunks, with a cap on the length of a
   line and on the total, and only well-formed JSON-RPC responses are kept;
 * it gets a minimal environment (PATH, HOME and the like) plus the `env` of
@@ -31,6 +37,7 @@ import queue
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -41,6 +48,11 @@ from .scoring import DESCRIPTION_CHECK
 #: Added to every finding that is not critical: the scanner matches patterns,
 #: it does not understand the text (see poisoning.py for what it looks for).
 HEURISTIC_NOTE = "manual review required — heuristic match only"
+
+#: What a critical match says in its place: it is no proof either, and a tool
+#: that only quotes an attack - a scanner for prompt injection - matches too.
+CRITICAL_NOTE = ("manual review advised \u2014 heuristic match; a tool that "
+                 "only quotes an attack matches too")
 
 #: What reading one server's descriptions may cost: each text counts its
 #: length and _TEXT_COST more. Fifty tools send some 25,000 characters, two
@@ -98,6 +110,102 @@ def not_launchable(cfg) -> str | None:
             or not (args is None or isinstance(args, list))
             or not (env is None or isinstance(env, dict))):
         return "the entry is malformed (see invalid-config); not launched"
+    return None
+
+
+#: What Windows runs when it finds no PATHEXT.
+_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+def _same_place(a: str, b: str) -> bool:
+    """True when two paths are one directory: links followed, and the case
+    ignored where the file system ignores it."""
+    return (os.path.normcase(os.path.realpath(a))
+            == os.path.normcase(os.path.realpath(b)))
+
+
+def _find_program(name: str, path: str, windows: bool | None = None,
+                  pathext: str | None = None, avoid=()) -> str | None:
+    """The file that the bare `name` stands for on `path` (the value of a
+    PATH variable), or None.
+
+    shutil.which would find a file in the current directory first on Windows
+    (by default, in every Python up to 3.14), where CreateProcess searches it
+    first too, and an empty or relative entry of PATH means the current
+    directory on POSIX.
+    What a server runs must not depend on where mcp-audit was started, so
+    only absolute entries count, and not the directories in `avoid` (the one
+    mcp-audit was run from, the one the server starts in) even when PATH
+    names them.
+
+    Windows (`windows`): the extensions of `pathext` are tried in order, a
+    file without one is no program (npm leaves a shell script called `npx`
+    beside npx.cmd), and the quotes Windows allows around an entry go.
+    Elsewhere the file must be executable."""
+    windows = _IS_WINDOWS if windows is None else windows
+    names = [name]
+    if windows:
+        extensions = [e for e in (pathext or _WINDOWS_PATHEXT).split(";") if e]
+        if not any(name.lower().endswith(e.lower()) for e in extensions):
+            names = [name + e for e in extensions]
+    for entry in path.split(os.pathsep):
+        if windows:
+            entry = entry.strip().strip('"')
+        if not entry or not os.path.isabs(entry):
+            continue
+        if any(_same_place(entry, place) for place in avoid):
+            continue
+        for candidate in names:
+            full = os.path.join(entry, candidate)
+            if os.path.isfile(full) and (windows or os.access(full, os.X_OK)):
+                return full
+    return None
+
+
+def _program(command: str, env: dict, start: str,
+             windows: bool | None = None) -> str | None:
+    """The file to run for the `command` of a config entry, or None when a
+    bare name is nowhere on the PATH of `env`.
+
+    A path is used as written; a relative one is taken from `start`, the
+    directory the server starts in, on every system (Popen would take it from
+    there on POSIX but from our own directory on Windows). A bare name is
+    looked up by _find_program, never in `start` or in the current
+    directory."""
+    windows = _IS_WINDOWS if windows is None else windows
+    if os.path.isabs(command):
+        return command
+    if os.sep in command or (os.altsep and os.altsep in command):
+        return os.path.join(start, command)
+
+    def variable(name):
+        value = None
+        for key, found in env.items():
+            if (key.upper() if windows else key) == name:
+                value = found
+        return value
+
+    path = variable("PATH")
+    avoid = [start]
+    try:
+        avoid.append(os.getcwd())
+    except OSError:     # the directory was removed from under us
+        pass
+    return _find_program(
+        command, os.defpath if path is None else path, windows=windows,
+        pathext=variable("PATHEXT") or os.environ.get("PATHEXT"), avoid=avoid)
+
+
+def switched_off(cfg) -> str | None:
+    """How a server entry says its client should not start it - `"disabled":
+    true` or `"enabled": false` - or None. Only a JSON boolean counts: any
+    other value is not a switch that mcp-audit can say it understands. Which
+    clients write these keys is unverified."""
+    if isinstance(cfg, dict):
+        if cfg.get("disabled") is True:
+            return '"disabled": true'
+        if cfg.get("enabled") is False:
+            return '"enabled": false'
     return None
 
 
@@ -311,6 +419,24 @@ def _parameters(schema) -> list[dict]:
     return found[:MAX_PARAMETER_TEXTS]
 
 
+def _server_texts(result) -> dict:
+    """What the answer to `initialize` says in words a model may be shown:
+    `instructions` (clients put it in the model's prompt) and the title and
+    description in `serverInfo` - as {"instructions" | "title" |
+    "description": text}, the ones that are non-empty strings."""
+    found: dict = {}
+    if isinstance(result, dict):
+        info = result.get("serverInfo")
+        for key, value in (("instructions", result.get("instructions")),
+                           ("title", info.get("title")
+                            if isinstance(info, dict) else None),
+                           ("description", info.get("description")
+                            if isinstance(info, dict) else None)):
+            if isinstance(value, str) and value.strip():
+                found[key] = value
+    return found
+
+
 def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
     """The handshake and tools/list on a running server."""
     _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -318,8 +444,10 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
                             "capabilities": {},
                             "clientInfo": {"name": "mcp-audit",
                                            "version": __version__}}})
-    if "error" in _await(reader, 1, deadline, timeout):
+    answer = _await(reader, 1, deadline, timeout)
+    if "error" in answer:
         raise _Fail("initialize handshake failed")
+    server = _server_texts(answer.get("result"))
     _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     tools: list[dict] = []
     note = None
@@ -346,9 +474,17 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
                          "description": _text(tool.get("description"))}
                 if isinstance(tool.get("title"), str) and tool["title"]:
                     entry["title"] = tool["title"]
+                annotations = tool.get("annotations")
+                if isinstance(annotations, dict) and isinstance(
+                        annotations.get("title"), str) \
+                        and annotations["title"].strip():
+                    entry["annotations_title"] = annotations["title"]
                 parameters = _parameters(tool.get("inputSchema"))
                 if parameters:
                     entry["parameters"] = parameters
+                outputs = _parameters(tool.get("outputSchema"))
+                if outputs:
+                    entry["outputs"] = outputs
                 tools.append(entry)
             else:  # not a tool object: still scan whatever it says
                 tools.append({"name": "", "description": _text(tool)})
@@ -358,7 +494,7 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
     else:
         note = f"the tool list has more than {MAX_PAGES} pages; the rest " \
                "were not scanned"
-    return {"ok": True, "tools": tools, "error": note}
+    return {"ok": True, "tools": tools, "server": server, "error": note}
 
 
 def _failure(error: str) -> dict:
@@ -468,16 +604,19 @@ def stop_on_signals():
                 pass
 
 
-def _probe(cfg: dict, timeout: float) -> dict:
+def _probe(cfg: dict, timeout: float, cwd: str) -> dict:
     deadline = time.monotonic() + timeout
-    # Windows: "npx" is really npx.cmd - resolve it via PATH/PATHEXT first.
-    argv = [shutil.which(cfg["command"]) or cfg["command"]]
-    argv += [str(a) for a in cfg.get("args") or []]
+    env = child_env(cfg)
+    # Windows: "npx" is really npx.cmd - found through PATH and PATHEXT.
+    program = _program(cfg["command"], env, cwd)
+    if program is None:
+        return _failure("launch failed (program not found on PATH)")
+    argv = [program] + [str(a) for a in cfg.get("args") or []]
     _STATE.launching = True
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, bufsize=0, env=child_env(cfg),
+            stderr=subprocess.DEVNULL, bufsize=0, env=env, cwd=cwd,
             **_group_kwargs())
         _STATE.procs.add(proc)
         error = None
@@ -506,7 +645,7 @@ def _probe(cfg: dict, timeout: float) -> dict:
             _STATE.procs.discard(proc)
 
 
-def probe_server(cfg, timeout: float = 15) -> dict:
+def probe_server(cfg, timeout: float = 15, cwd: str | None = None) -> dict:
     """Handshake + tools/list. Returns {"ok", "tools":[{name, description}],
     "error"}; never raises an Exception (Interrupted, which is not one, ends
     the pass: see stop_on_signals). `error` is set when the probe failed and
@@ -515,79 +654,119 @@ def probe_server(cfg, timeout: float = 15) -> dict:
     The whole probe - launch, handshake, every tools/list page - has one
     deadline of `timeout` seconds, enforced from outside the server: a
     silent, wedged or malicious server (or a grandchild that keeps its pipes
-    open) cannot hold the probe, or CI, past it."""
+    open) cannot hold the probe, or CI, past it.
+
+    The server starts in `cwd` when one is given (and that directory is left
+    as it is), else in a new empty directory that is private to this user and
+    removed when the probe ends, however it ends: the directory mcp-audit was
+    run from is not the server's to use (see the top of this module)."""
     reason = not_launchable(cfg)
     if reason:
         return _failure(reason)
+    if switched_off(cfg):
+        return _failure(f"disabled in its config ({switched_off(cfg)}); "
+                        "not launched")
+    scratch = None
     try:
-        return _probe(cfg, timeout)
+        if cwd is None:
+            try:
+                scratch = tempfile.mkdtemp(prefix="mcp-audit-")
+            except OSError:
+                return _failure("launch failed (no directory to start it in)")
+            cwd = scratch
+        return _probe(cfg, timeout, cwd)
     except Exception as e:  # the contract is "never raises"
         return _failure(f"probe failed ({type(e).__name__})")
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _texts(tool: dict):
-    """(where, text) for every text of a tool that is read: its description
-    and title, then each text of its input schema."""
+    """(where, text) for every text of a tool that is read: its description,
+    its title and the title in its annotations, then each text of its input
+    schema and of its output schema."""
     yield "description", tool.get("description")
     if tool.get("title"):
         yield "title", tool.get("title")
+    if tool.get("annotations_title"):
+        yield "annotations title", tool.get("annotations_title")
     for parameter in tool.get("parameters") or ():
         name = str(parameter.get("name"))[:_NAME_SHOWN]
         yield (f"parameter '{name}' description" if name
                else "input schema description"), parameter.get("description")
+    for output in tool.get("outputs") or ():
+        name = str(output.get("name"))[:_NAME_SHOWN]
+        yield (f"output '{name}' description" if name
+               else "output schema description"), output.get("description")
+
+
+def _all_texts(tools: list[dict], server: dict | None):
+    """(subject, where, text) for every text that is read: what the server
+    says about itself (`instructions` first: a client puts it in the model's
+    prompt), then the texts of each tool."""
+    for key in ("instructions", "title", "description"):
+        if isinstance((server or {}).get(key), str):
+            yield "server", key, server[key]
+    for t in tools:
+        subject = f"tool '{str(t.get('name'))[:_NAME_SHOWN]}'"
+        for where, text in _texts(t):
+            yield subject, where, text
 
 
 _RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
-def audit_descriptions(tools: list[dict]) -> list[dict]:
-    """The findings about what a server's tools say about themselves: one
-    per text that adds up to something (see poisoning.scan), with the signals
-    in words and never the text. A text that cannot be scanned is a high
-    finding, not a pass. The server chooses how much it sends, so reading is
-    bounded: past MAX_SCANNED the texts are counted as unread (a medium
-    finding), and past MAX_LISTED the findings are counted, not listed."""
+def audit_descriptions(tools: list[dict],
+                       server: dict | None = None) -> list[dict]:
+    """The findings about what a server and its tools say about themselves:
+    one per text that adds up to something (see poisoning.scan), with the
+    signals in words and never the text. `server` is probe_server's "server"
+    entry: the instructions and the title and description from initialize. A
+    text that cannot be scanned is a high finding, not a pass. The server
+    chooses how much it sends, so reading is bounded: past MAX_SCANNED the
+    texts are counted as unread (a medium finding), and past MAX_LISTED the
+    findings are counted, not listed."""
     from . import poisoning     # not imported by a run that never goes deep
     findings: list[dict] = []
     spent = unread = unlisted = 0
     worst = "low"
-    for t in tools:
-        name = str(t.get("name"))[:_NAME_SHOWN]
-        for where, text in _texts(t):
-            if spent >= MAX_SCANNED:
-                unread += 1
+    for subject, where, text in _all_texts(tools, server):
+        if spent >= MAX_SCANNED:
+            unread += 1
+            continue
+        spent += _TEXT_COST + (len(text) if isinstance(text, str) else 0)
+        try:
+            verdict = poisoning.scan(text)
+        except Exception as e:  # fail closed: unread is not clean
+            severity = "high"
+            message = (f"{subject} {where} could not be scanned "
+                       f"({type(e).__name__}) — {HEURISTIC_NOTE}")
+        else:
+            if verdict is None:
                 continue
-            spent += _TEXT_COST + (len(text) if isinstance(text, str) else 0)
-            try:
-                verdict = poisoning.scan(text)
-            except Exception as e:  # fail closed: unread is not clean
-                severity = "high"
-                message = (f"tool '{name}' {where} could not be scanned "
-                           f"({type(e).__name__}) — {HEURISTIC_NOTE}")
+            severity = verdict.severity
+            message = f"{subject} {where} " + "; ".join(verdict.labels)
+            # Heuristic: never auto-removable (--fix only acts on
+            # launch-time attacks), always flagged for manual review.
+            if severity != "critical":
+                message += f" \u2014 {HEURISTIC_NOTE}"
             else:
-                if verdict is None:
-                    continue
-                severity = verdict.severity
-                message = (f"tool '{name}' {where} "
-                           + "; ".join(verdict.labels))
-                if severity != "critical":
-                    # Heuristic: never auto-removable (--fix only acts on
-                    # launch-time attacks), always flagged for manual review.
-                    message += f" — {HEURISTIC_NOTE}"
-            if len(findings) >= MAX_LISTED:
-                unlisted += 1
-                if _RANK[severity] > _RANK[worst]:
-                    worst = severity
-                continue
-            findings.append({"severity": severity, "check": DESCRIPTION_CHECK,
-                             "message": message})
+                message += f" \u2014 {CRITICAL_NOTE}"
+        if len(findings) >= MAX_LISTED:
+            unlisted += 1
+            if _RANK[severity] > _RANK[worst]:
+                worst = severity
+            continue
+        findings.append({"severity": severity, "check": DESCRIPTION_CHECK,
+                         "message": message})
     if unlisted:
         findings.append({
             "severity": worst, "check": DESCRIPTION_CHECK,
             "message": f"{unlisted} more tool texts matched too; only the "
-                       f"first {MAX_LISTED} findings are listed"
-                       + ("" if worst == "critical"
-                          else f" — {HEURISTIC_NOTE}")})
+                       f"first {MAX_LISTED} findings are listed \u2014 "
+                       + (CRITICAL_NOTE if worst == "critical"
+                          else HEURISTIC_NOTE)})
     if unread:
         findings.append({
             "severity": "medium", "check": DESCRIPTION_CHECK,

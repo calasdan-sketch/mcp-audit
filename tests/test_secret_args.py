@@ -60,6 +60,12 @@ def shapes(s):
         "bare": {"command": "node", "args": ["srv.js", s]},
         "before-package": {"command": "npx", "args": ["--auth", s,
                                                       "pkg@1.0.0"]},
+        "unknown-option": {"command": "npx", "args": ["--weird-opt", s, "-y",
+                                                      "pkg@1.0.0"]},
+        "unknown-option-uvx": {"command": "uvx", "args": ["--weird-opt", s,
+                                                          "mcp-server-fetch"]},
+        "unknown-option-in-shell": {"command": "bash", "args": [
+            "-lc", "npx --weird-opt " + s + " -y pkg@1.0.0"]},
         "uvx-option": {"command": "uvx", "args": ["--token", s,
                                                   "mcp-server-fetch==1.2.3"]},
         "userinfo": {"command": "node", "args": [
