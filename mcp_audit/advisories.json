@@ -2,31 +2,31 @@
   {
     "cve": "CVE-2026-104120",
     "fixed_in": null,
-    "package": "@modelcontextprotocol/server-fetch",
+    "package": "mcp-server-fetch",
+    "severity": "medium",
+    "source": "CVE record published 2026-10-02 by VulDB (nvd.nist.gov/vuln/detail/CVE-2026-104120); report github.com/modelcontextprotocol/servers/issues/4492",
+    "title": "SSRF in mcp-server-fetch: fetch_url in mcp_server_fetch/server.py can be made to request internal addresses (affected: up to 2026.6.4, per the record)",
+    "verified": true,
+    "note": "The record scores it CVSS 3.1 7.3 (High); its CNA is VulDB, not the maintainers. On 2026-10-15 the maintainers had published no advisory and the fix pull request (modelcontextprotocol/servers#4890) was not merged. PyPI has later releases (2026.7.10, 2026.8.18, 2026.10.10) and no source says whether they are fixed, so no fixed version is recorded. Graded medium until the maintainers confirm."
+  },
+  {
+    "cve": "CVE-2026-16498, CVE-2026-16496",
+    "fixed_in": "1.1.0",
+    "package": "terraform-mcp-server",
     "severity": "high",
-    "source": "community research, Oct 2026",
-    "title": "SSRF in mcp-server-fetch — server-side request forgery via fetched URLs",
-    "verified": false,
-    "note": "No matching OSV record found as of 2026-10-16; reported, unconfirmed."
+    "source": "HashiCorp bulletin HCSEC-2026-23 (discuss.hashicorp.com); CVE records published 2026-07-28",
+    "title": "terraform-mcp-server before 1.1.0 (from 0.3.0): one user's credentials can serve other users in the streamable-HTTP transport (CVSS 3.1 10.0 stateless mode, 8.9 stateful mode)",
+    "verified": true,
+    "note": "Both records are about the streamable-HTTP transport: in stateless mode one user's Terraform token can be used for later users' tool calls; in stateful mode a user who learns another user's session id runs tool calls with that user's credentials. The records do not describe stdio use as affected. Upgrade anyway."
   },
   {
-    "cve": "advisory-2026-10-oauth",
-    "fixed_in": null,
-    "package": "mcp",
-    "severity": "critical",
-    "source": "community research, Oct 2026",
-    "title": "OAuth credential theft in official MCP Python SDK (mcp package)",
-    "verified": false,
-    "note": "No matching OSV record found as of 2026-10-16; reported, unconfirmed."
-  },
-  {
-    "cve": "advisory-2026-10-session",
-    "fixed_in": null,
-    "package": "@hashicorp/mcp-server",
-    "severity": "critical",
-    "source": "community research, Oct 2026",
-    "title": "CVSS-10.0 session-isolation flaws in HashiCorp MCP servers",
-    "verified": false,
-    "note": "No matching OSV record found as of 2026-10-16; reported, unconfirmed."
+    "cve": "CVE-2026-16326, CVE-2026-16328",
+    "fixed_in": "0.1.4",
+    "package": "consul-mcp-server",
+    "severity": "high",
+    "source": "HashiCorp bulletin HCSEC-2026-24 (discuss.hashicorp.com); CVE records published 2026-07-29",
+    "title": "consul-mcp-server before 0.1.4 (from 0.1.0): one client's Consul token can be used for other clients in streamable-HTTP stateless mode (CVSS 3.1 10.0), and a client can redirect Consul API traffic, token included (SSRF)",
+    "verified": true,
+    "note": "The bulletin lists the first flaw for stateless mode only (stateful mode is not affected) and the second for deployments whose clients are not fully trusted. The records do not describe stdio use as affected. Upgrade anyway."
   }
 ]

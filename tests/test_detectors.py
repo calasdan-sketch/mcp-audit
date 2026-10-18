@@ -152,7 +152,7 @@ class TestStaticDetectors(unittest.TestCase):
         f = detectors.detect_floating_version("old-fetch",
                                               self.nasty["old-fetch"])
         self.assertEqual(len(f), 1)
-        self.assertIn("@modelcontextprotocol/server-fetch", f[0]["message"])
+        self.assertIn("mcp-server-fetch", f[0]["message"])
 
     def test_pinned_version_ok(self):
         f = detectors.detect_floating_version("fetch", self.clean["filesystem"])
@@ -320,11 +320,53 @@ class TestNewDetections(unittest.TestCase):
         self.assertIn("pipe-to-shell", {x["check"] for x in f})
 
 
-class TestUnverifiedAdvisories(unittest.TestCase):
-    def test_shipped_advisories_marked_unverified(self):
-        for adv in detectors.load_advisories():
-            self.assertIs(adv.get("verified"), False, adv)
+class TestTheShippedAdvisories(unittest.TestCase):
+    """The feed is curated by hand. An entry that says it is verified must
+    name public records (a CVE or GHSA id), and every entry says where the
+    facts came from. (The three October 2026 reports that shipped as
+    unverified were checked on 2026-10-18 and are replaced by these.)"""
 
+    ID = r"^(CVE-[0-9]{4}-[0-9]{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})$"
+
+    def test_every_entry_is_complete(self):
+        for adv in detectors.load_advisories():
+            self.assertIsInstance(adv.get("verified"), bool, adv)
+            self.assertIn(adv.get("severity"),
+                          ("low", "medium", "high", "critical"), adv)
+            for key in ("package", "title", "source", "note"):
+                self.assertTrue(isinstance(adv.get(key), str)
+                                and adv[key].strip(), (key, adv))
+            self.assertTrue(adv["fixed_in"] is None
+                            or isinstance(adv["fixed_in"], str), adv)
+
+    def test_a_verified_entry_names_public_records(self):
+        for adv in detectors.load_advisories():
+            if adv["verified"]:
+                ids = [i.strip() for i in adv["cve"].split(",")]
+                self.assertTrue(ids, adv)
+                for one in ids:
+                    self.assertRegex(one, self.ID)
+
+    def test_the_hashicorp_servers_are_matched_by_their_command_name(self):
+        for command, fixed in (("terraform-mcp-server", "1.1.0"),
+                               ("consul-mcp-server", "0.1.4")):
+            f = detectors.detect_known_bad(
+                "hc", {"command": command, "args": []},
+                detectors.load_advisories())
+            self.assertEqual(len(f), 1, command)
+            self.assertEqual(f[0]["check"], "known-vulnerable")
+            self.assertIn("Fixed in " + fixed, f[0]["message"])
+
+    def test_a_verified_entry_keeps_its_severity(self):
+        advs = [{"package": "p", "cve": "CVE-2026-1", "title": "t",
+                 "severity": "critical", "fixed_in": None, "verified": True}]
+        f = detectors.detect_known_bad("x", {"command": "npx",
+                                             "args": ["-y", "p"]}, advs)
+        self.assertEqual(f[0]["severity"], "critical")
+        self.assertNotIn("UNVERIFIED", f[0]["message"])
+
+
+class TestUnverifiedAdvisories(unittest.TestCase):
     def test_unverified_capped_at_medium_and_labelled(self):
         advs = [{"package": "p", "cve": "CVE-X", "title": "t",
                  "severity": "critical", "fixed_in": None,

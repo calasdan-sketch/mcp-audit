@@ -2,7 +2,7 @@
 
 pyproject.toml declared no package data, so `pip install` produced a wheel
 without advisories.json; load_advisories() swallowed the OSError and returned
-[]: an installed mcp-audit graded `npx @modelcontextprotocol/server-fetch@1.0.0`
+[]: an installed mcp-audit graded `uvx mcp-server-fetch==2026.6.4`
 100/100 where a checkout said 90/100 "known vulnerable". Nothing said so.
 """
 
@@ -24,7 +24,7 @@ from _support import isolated_machine, run_all_formats, write_json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FETCH = {"mcpServers": {"fetch": {
-    "command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch@1.0.0"]}}}
+    "command": "uvx", "args": ["mcp-server-fetch==2026.6.4"]}}}
 
 
 def read(name):

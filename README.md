@@ -210,7 +210,7 @@ Weekly cron example (uses the installed console script):
 | `exfiltration-endpoint` | critical (args) / medium (env) | Remote `http(s)://`/`ws(s)://` URL or bare `IP:port` baked into the launch config. Not reported: loopback (`localhost`, `127.x`, `::1`, `0.0.0.0`), the well-known API hosts below, a host named with `--allow-host` (https and wss only), the three uses of a URL that have a check of their own (`git-source`, `package-registry` and `remote-server`, below) and a bare `IP:port` on the local network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`: a database, say). A public address (`203.0.113.9:4444`) is a callback and is reported. A URL is read the way Python and the Node/browser parsers both read it (see "How URLs are judged") |
 | `git-source` | medium / low | A package a runner installs from a git repository on a forge - `github.com`, `gitlab.com`, `bitbucket.org`, `codeberg.org`, or a host named with `--allow-host` - over https: `uvx --from git+https://github.com/o/r`, `uvx git+https://...`, `--with`, `uv tool run`, `pipx run --spec`, `npx github:o/r`, `npx git+https://...`, `-p`/`--package`, `pnpm dlx`, `bunx`, `yarn dlx`, `npm exec`, also through `cmd /c` and `bash -lc`. **Medium** when nothing is pinned or a branch or a range is (every launch can run different code); **low** when a commit is (`@<sha>`, `#<sha>`) or a tag is - a tag can be moved, so the message still asks for a commit. A git URL on any other host, or over plain http, is not this: it is a remote endpoint, critical. `git+ssh://` and `git+file:` have no http URL to judge and are not reported |
 | `package-registry` | medium / high | The packages come from a registry other than the default, so whoever runs it can run code as you: `--registry`, `--@scope:registry=`, `--index-url`, `-i`, `--index`, `--default-index`, `--extra-index-url`, `-f`/`--find-links` before the package, or `NPM_CONFIG_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL` in `env`. **Medium** over https; **high** over plain http, where anyone on the way can swap what it serves. Not reported: the default registries (`registry.npmjs.org`, `registry.yarnpkg.com`, `pypi.org`, `pypi.python.org`, `files.pythonhosted.org`), one on the local machine and one named with `--allow-host` (over https). A flag after the package belongs to the program being run, not to the runner, and is an ordinary URL |
-| `known-vulnerable` | high/crit | Package matches the built-in advisory feed (`advisories.json`; unverified entries capped at medium) or, with `--online`, an OSV record (high) |
+| `known-vulnerable` | medium to crit | Package matches the built-in advisory feed (`advisories.json`; the entry sets the grade, unverified entries are capped at medium) or, with `--online`, an OSV record (high) |
 | `osv-lookup` | low | `--online` only: the OSV lookup for a pinned package failed (no network, a timeout, an answer that is not JSON). The message names the package and version; a lookup that fails is a finding, never a silent pass. A lookup that succeeds and finds a record is `known-vulnerable` |
 | `floating-version` | medium | A package that is not pinned to one release, so every launch can pull a different one: no version (`npx -y pkg`, `uvx pkg`), a tag (`pkg@latest`, `@next`) or a range (`^1.2.0`, `~1`, `>=1`, `1.x`, `*`, `pkg>=1`, `pkg==1.*`). An exact version (`pkg@1.2.3`, `uvx pkg==1.2.3`) or a `sha256:` digest is pinned. Read through `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `uvx`, `uv tool run`, `pipx run` and through `cmd /c`, `bash -lc`, `env` and `sudo`. An option named for a credential (`--auth`, `--token`, `--password`; not `--no-auth` and the like) ahead of the package takes the next argument as its value, so a secret is never read as the package. Any other option that mcp-audit has in none of its tables (the ones that take a value and the ones that do not) leaves the package unnamed: the word after it could be its value, and the finding says `package not shown`. A git, URL, tarball or path spec has no version to judge here (a git spec on a forge is judged by `git-source`) |
 | `secret-env` | medium | Server receives credentials via env: any variable whose name has a `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `AUTHORIZATION`, `BEARER`, `COOKIE`, `DSN`, `PAT` or `APIKEY` word, or whose last word is `AUTH` or `PASS` (`API_KEY`, `OPENAI_KEY`, `accessToken`, `DB_PASSWORD`, `MY_PASS`, `BASIC_AUTH`). `PUBLIC_KEY`, `KEYBOARD_LAYOUT`, `AUTH_URL` and `PASS_THROUGH` are not flagged. Only the names are printed |
@@ -637,14 +637,35 @@ If it is missing or malformed mcp-audit exits 2 and says so, instead of
 quietly reporting every known-vulnerable package as clean. The test-suite
 builds the wheel, unpacks it elsewhere and runs the installed copy.
 
-`mcp_audit/advisories.json` carries three October 2026 community reports
-(mcp-server-fetch SSRF, Python SDK OAuth theft, HashiCorp session-isolation).
-None matched a public OSV record when checked (2026-10-16), so each is marked
-`"verified": false`: findings say **UNVERIFIED**, are capped at medium, and
-should be checked before acting on or quoting them. Entries with no known
-`fixed_in` are flagged "review manually" rather than silently passed. PRs
-welcome — the feed is just JSON; set `"verified": true` only with a public
-record.
+`mcp_audit/advisories.json` carries three entries, each checked on 2026-10-18
+against the public record it cites (the `source` field says which):
+
+- `mcp-server-fetch`: CVE-2026-104120, a server-side request forgery in
+  `fetch_url`. The record lists versions up to 2026.6.4 and comes from the
+  CVE numbering authority VulDB, not from the maintainers, who had published
+  no advisory and had not merged the fix pull request on 2026-10-15. No fixed
+  version is on record (PyPI has later releases; no source says whether they
+  are fixed), so every config that runs it is flagged "review manually", and
+  the finding is graded medium rather than the record's 7.3.
+- `terraform-mcp-server` (before 1.1.0): CVE-2026-16498 and CVE-2026-16496,
+  HashiCorp bulletin HCSEC-2026-23.
+- `consul-mcp-server` (before 0.1.4): CVE-2026-16326 and CVE-2026-16328,
+  HashiCorp bulletin HCSEC-2026-24.
+
+The HashiCorp flaws are in the streamable-HTTP transport (one user's
+credentials serving other users); the bulletins do not describe a local stdio
+setup as affected, but the finding cannot see which transport a command uses,
+so it asks for the upgrade. The match is by package name or command name: a
+`docker run hashicorp/terraform-mcp-server` is not matched. The earlier
+version of this file held three October 2026 community reports marked
+unverified; the npm package name it gave for the fetch server could not be
+confirmed, and the Python SDK OAuth flaw (GHSA-qx49-fqc8-xw99) concerns
+clients built on the SDK, not the servers that a config launches, so it is no
+longer listed (`--online` still reports advisories for a pinned `mcp`
+package). An entry marked `"verified": false` would be graded at most medium
+and say **UNVERIFIED**. The feed is curated by hand and is just JSON: set
+`"verified": true` only with a public record, and check a record before you
+quote it.
 
 `--online` queries [OSV](https://osv.dev) (`api.osv.dev`, stdlib `urllib`)
 for each package pinned to an exact version (npm / PyPI). Tags and ranges are
