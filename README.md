@@ -9,54 +9,69 @@ packages, floating version pins, and secrets handed to servers via env.
 
 Thousands of one-line-install MCP servers, ~zero vetting. This is the vetting.
 
+**What it knows, plainly:** the advisory feed built into the package holds
+**3 curated entries** and works offline; it is a seed, not a vulnerability
+database. Run `mcp-audit --online` to also look up your pinned npm and PyPI
+packages in [OSV](https://osv.dev) (that sends each package name and version
+to OSV). Everything else - exfiltration endpoints, shells and downloaders,
+floating versions, secrets, risky launches - is found by reading your
+configs, with no network. **Never run `--deep` on a config you did not
+write:** it launches the servers in it.
+
 ## Install
 
 Zero dependencies — Python 3.10+ stdlib only.
 
 ```bash
-pip install git+https://github.com/calasdan-sketch/mcp-audit
+pip install mcp-audit
 mcp-audit                         # auto-discovers installed clients
 ```
 
-Or from a clone without installing: `python3 -m mcp_audit` (same flags).
+Always run the installed `mcp-audit` command. `python3 -m mcp_audit` runs
+whatever `mcp_audit/` package is in the **current directory** first, so in a
+repository you have just cloned (the very thing you want to audit) it could
+run that repository's code. Use it only from a clone of this project that you
+trust, from inside that clone, and install with `pip install .` from there
+for everyday use.
 
 ## Usage
 
 ```bash
 # Static audit (safe: reads configs only, never executes servers)
-python3 -m mcp_audit
+mcp-audit
 
-# Deep audit: also launch each stdio server and scan its live tool
+# Deep audit: only for configs you wrote or trust - it RUNS their servers.
+# It also launches each stdio server and scans its live tool
 # descriptions for prompt-injection. This EXECUTES the servers: it lists
 # them first, and leaves out the ones the static audit rated critical or
 # could not analyze, and the ones that come from project files in the current
 # directory. Each one starts in an empty temporary directory, not in the one
 # you are in.
-python3 -m mcp_audit --deep
-python3 -m mcp_audit --deep --probe-critical   # launch the left-out ones too
-python3 -m mcp_audit --deep --probe-project    # launch the project's too
+mcp-audit --deep
+mcp-audit --deep --probe-critical   # launch the left-out ones too
+mcp-audit --deep --probe-project    # launch the project's too
 
 # Audit a specific file, JSON output for CI, fail the build on highs
-python3 -m mcp_audit --config ~/.claude.json --format json --fail-on high
+mcp-audit --config ~/.claude.json --format json --fail-on high
 
 # SARIF 2.1.0 for GitHub code scanning / IDE viewers
-python3 -m mcp_audit --format sarif > mcp-audit.sarif
+mcp-audit --format sarif > mcp-audit.sarif
 
 # Trust a host of your own (repeatable; https and wss only): a remote MCP
 # server, package registry or git forge there is no longer reported
-python3 -m mcp_audit --allow-host mcp.corp.example --allow-host '*.mirror.corp.example'
+mcp-audit --allow-host mcp.corp.example --allow-host '*.mirror.corp.example'
 
 # Also look up pinned npx/uvx packages in OSV (network; sends name+version)
-python3 -m mcp_audit --online
+mcp-audit --online
 
 # Print the version and stop
-python3 -m mcp_audit --version
+mcp-audit --version
 
 # Preview which servers --fix would remove, then remove them (it asks first
 # and backs the file up; --yes when there is no terminal to ask on)
-python3 -m mcp_audit --fix
-python3 -m mcp_audit --fix --remove
-python3 -m mcp_audit --fix --remove --yes
+mcp-audit --fix
+mcp-audit --fix --remove
+mcp-audit --fix --remove --yes
 ```
 
 Exit codes: `0` = the run finished and no `--fail-on` threshold was met.
@@ -214,6 +229,10 @@ Weekly cron example (uses the installed console script):
 | `osv-lookup` | low | `--online` only: the OSV lookup for a pinned package failed (no network, a timeout, an answer that is not JSON). The message names the package and version; a lookup that fails is a finding, never a silent pass. A lookup that succeeds and finds a record is `known-vulnerable` |
 | `floating-version` | medium | A package that is not pinned to one release, so every launch can pull a different one: no version (`npx -y pkg`, `uvx pkg`), a tag (`pkg@latest`, `@next`) or a range (`^1.2.0`, `~1`, `>=1`, `1.x`, `*`, `pkg>=1`, `pkg==1.*`). An exact version (`pkg@1.2.3`, `uvx pkg==1.2.3`) or a `sha256:` digest is pinned. Read through `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `uvx`, `uv tool run`, `pipx run` and through `cmd /c`, `bash -lc`, `env` and `sudo`. An option named for a credential (`--auth`, `--token`, `--password`; not `--no-auth` and the like) ahead of the package takes the next argument as its value, so a secret is never read as the package. Any other option that mcp-audit has in none of its tables (the ones that take a value and the ones that do not) leaves the package unnamed: the word after it could be its value, and the finding says `package not shown`. A git, URL, tarball or path spec has no version to judge here (a git spec on a forge is judged by `git-source`) |
 | `secret-env` | medium | Server receives credentials via env: any variable whose name has a `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `AUTHORIZATION`, `BEARER`, `COOKIE`, `DSN`, `PAT` or `APIKEY` word, or whose last word is `AUTH` or `PASS` (`API_KEY`, `OPENAI_KEY`, `accessToken`, `DB_PASSWORD`, `MY_PASS`, `BASIC_AUTH`). `PUBLIC_KEY`, `KEYBOARD_LAYOUT`, `AUTH_URL` and `PASS_THROUGH` are not flagged. Only the names are printed |
+| `secret-in-args` | high / medium | A credential is written into the launch arguments, where every process on the machine can read it and the config keeps it: **high** for a well-known shape (`ghp_...`, `sk-...`, `AKIA...`, a JWT, `Bearer ...`), **medium** for the value of a credential-named option (`--token abc123`, `--api-key=abc123`, `-e MY_PASS=abc123`). A reference (`$TOKEN`, `${TOKEN}`, `%TOKEN%`), a short or plain value (`true`, `oauth`) and options that name a place (`--token-file`, `--api-key-env`) are not reported. The value is never printed |
+| `privileged-launch` | high | The server is started with `sudo`, `doas`, `pkexec`, `su`, `runas` or `gsudo`, also inside `bash -c` |
+| `container-escape` | high / medium | A `docker`/`podman`/`nerdctl run` that hands the container the host: `--privileged`, `--cap-add` of `ALL`/`SYS_ADMIN`/`SYS_PTRACE`/..., `--pid`/`--ipc`/`--userns=host`, `--security-opt` with `unconfined`, a mount of `/`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `~/.ssh`/`~/.aws`/... or of the runtime's socket (`docker.sock`) (high); `--network=host`, `--device` or a mount of the home directory (medium) |
+| `temp-binary` | high | The command, or a script or program given as an argument, lives in a folder every user can write to (`/tmp`, `/var/tmp`, `/dev/shm`, `%TEMP%`, `$TMPDIR`, `C:\Windows\Temp`): whoever can replace that file controls the server |
 | `remote-server` | medium | A non-local MCP server: a `url` or `serverUrl` entry, or the address given to a bridge - `mcp-remote`, `mcp-proxy` or `supergateway`, also started through `npx`, `bunx`, `pnpm dlx`, `uvx`, `cmd /c` or `bash -lc` - so traffic leaves the machine by design, as with a `url` entry. A bridge has one server: the URL after `--sse`, `--streamableHttp`, `--url` or `--remote`, or else the first URL it is given; any other URL is an endpoint. Not reported: a local server, or one named with `--allow-host` (https and wss only) |
 | `unparseable-url` | high | A URL in the config that cannot be taken apart (`http://[x`), or whose host depends on the parser that reads it (`https://evil.example\@api.github.com/`: Python says api.github.com, Node says evil.example): where it points is unknown, so it is treated as unsafe. The second kind comes with the remote endpoint it can point to. One bad URL never hides another |
 | `detector-error` | high | A check crashed on this entry, or could not read all of it (a command line over 1,000,000 characters or nested too deeply, a script with more than 2,000 different URLs). mcp-audit fails closed: this is a visible HIGH finding (so `--fail-on high` trips), never a quiet pass. Only the exception class is shown |
@@ -611,8 +630,8 @@ mention task ids to the user").
 | Severity | What adds up to it |
 |---|---|
 | critical | An order to ignore or override the agent's instructions, alone. Or a combination: hiding it from the user together with a file, a data transfer, a fake tag or hidden text; a sensitive file the agent must read and hand on, or a sentence that makes its contents a duty (`the sidenote parameter must contain the contents of ~/.ssh/id_rsa`); hidden text that carries a payload; a script or the agent's prompt next to any of these |
-| high | One strong signal: hiding something from the user, a sensitive file to be read, data in the query of a URL, the agent's own prompt handed over, hidden characters in a description |
-| medium | A lead: a result posted to a URL, the contents of a key or credentials file mentioned (`the full contents of ~/.ssh/id_rsa`, which a tool that really returns them says too), a fake tag, a claim of priority over the user, an HTML comment, a script run from a URL, text that is encoded and says nothing wrong, a text longer than 100,000 characters (only that much is scanned), or a server whose texts add up to more than about 2,000,000 characters (the rest is not scanned, and a finding says so) |
+| high | One strong signal: hiding something from the user, a sensitive file to be read, data in the query of a URL, the agent's own prompt handed over, hidden characters in a description, a text longer than 100,000 characters (only that much is scanned: an instruction behind the padding would not be read, so it is not passed) |
+| medium | A lead: a result posted to a URL, the contents of a key or credentials file mentioned (`the full contents of ~/.ssh/id_rsa`, which a tool that really returns them says too), a fake tag, a claim of priority over the user, an HTML comment, a script run from a URL, text that is encoded and says nothing wrong, or a server whose texts add up to more than about 2,000,000 characters (the rest is not scanned, and a finding says so) |
 | low | A long base64-looking string that decodes to nothing readable |
 
 Every finding says it is a heuristic: below critical it carries `manual review
@@ -637,7 +656,8 @@ If it is missing or malformed mcp-audit exits 2 and says so, instead of
 quietly reporting every known-vulnerable package as clean. The test-suite
 builds the wheel, unpacks it elsewhere and runs the installed copy.
 
-`mcp_audit/advisories.json` carries three entries, each checked on 2026-10-18
+`mcp_audit/advisories.json` carries three entries (it is a seed, not a
+database: `--online` is how the rest of your packages are checked), each checked on 2026-10-18
 against the public record it cites (the `source` field says which):
 
 - `mcp-server-fetch`: CVE-2026-104120, a server-side request forgery in
@@ -728,6 +748,25 @@ What mcp-audit does not do, so that you do not find out the hard way:
   and Goose are not covered.
 - A config over 64 MiB is not read (it is reported as a file that could not
   be audited).
+- A credential on the command line is found by the shape of well-known
+  tokens and by the name of the option that carries it (`--token`,
+  `--api-key`, `NAME_SECRET=...`, from a list of words); a password given as a
+  bare positional argument, under an unremarkable option name, or in a
+  config file that the command reads, is not. A container is judged by its
+  `docker run` options only: a `docker compose` file, a Kubernetes manifest, a
+  `devcontainer.json` or an image that is itself built to escape are not
+  read, and neither are the capabilities of rootless runtimes or `--user 0`.
+  Temporary folders are the ones listed under `temp-binary`; a user-specific
+  cache or download folder (`~/Downloads`, `~/.cache`) is not one. A program
+  that was fine when audited and replaced later is not noticed (there is no
+  file hashing), and `sudo` rules (`NOPASSWD`) are not read.
+- Time is bounded: a config over 64 MiB is not read, a script over
+  1,000,000 characters is a `detector-error`, and so is the text of shell
+  scripts beyond 4,000,000 characters in one run (all servers together) -
+  that entry is reported, not silently skipped. A tool description longer
+  than 100,000 characters is read only to that point and is a **high** finding
+  (`tool-description-injection`, "only the first 100000 were scanned"): an
+  instruction behind that much padding was not read.
 - The advisory feed is curated by hand: verify before quoting a CVE
   externally. `--online` looks up exact npm and PyPI versions only.
 - URLs are found by their `http:`, `https:`, `ws:` or `wss:` start followed

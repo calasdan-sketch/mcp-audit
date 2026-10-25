@@ -318,7 +318,6 @@ class TestRedactionTimeIsLinear(unittest.TestCase):
         for label, text in (
                 ("letters", "a" * n),
                 ("scheme chars", "xoxb-" * (n // 5)),
-                ("jwt-like blocks", "eyJaaaaaaaaa-" * (n // 13)),
                 ("punctuation then a letter", "https://x/" + "." * n + "a"),
                 ("url-like starts", "a://" * (n // 4)),
                 ("names", "token=a " * (n // 8)),

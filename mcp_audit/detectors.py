@@ -100,7 +100,24 @@ PS_ENCODED_RE = re.compile(r"^[-/](e|ec|en\w*)$", re.IGNORECASE)
 PS_COMMAND_RE = re.compile(r"^[-/](c|com\w*)$", re.IGNORECASE)
 
 
+#: How much of an attacker-sized string (a package name, a version) one
+#: message echoes, and the most any one message holds.
+_SHOWN_MAX = 80
+_MESSAGE_MAX = 1500
+
+
+def _echo(text, limit: int = _SHOWN_MAX) -> str:
+    """`text` for a message: cut at `limit` characters, with its full length
+    when that cut something off."""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... ({len(text)} characters)"
+
+
 def _finding(severity: str, check: str, message: str) -> dict:
+    if len(message) > _MESSAGE_MAX:
+        message = message[:_MESSAGE_MAX] + "... (cut)"
     return {"severity": severity, "check": check, "message": message}
 
 
@@ -482,6 +499,16 @@ def _remote_server(url: str, allow=(), via: str = "",
 # cannot be followed (see "Limitations" in the README).
 
 _MAX_SCRIPT = 1_000_000   # characters
+#: Characters of shell script read in one run, all servers together. A
+#: million-character script of quotes takes seconds; a config of many of them
+#: must not take minutes. Past it an entry is a visible `detector-error`.
+MAX_SCRIPT_WORK = 4_000_000
+_script_work = [MAX_SCRIPT_WORK]
+
+
+def reset_work_budget() -> None:
+    """Start counting the script text of a new run (see MAX_SCRIPT_WORK)."""
+    _script_work[0] = MAX_SCRIPT_WORK
 _MAX_DEPTH = 8            # nested $( ) / backticks / shells inside shells
 
 _ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
@@ -537,6 +564,9 @@ def _lex(script: str, dialect: str) -> "list[_Stage]":
     only on input too large or too deeply nested to read."""
     if len(script) > _MAX_SCRIPT:
         raise _TooComplex("script too long to read")
+    _script_work[0] -= len(script)
+    if _script_work[0] < 0:
+        raise _TooComplex("too much script text in this run to read")
     out: "list[_Stage]" = []
     _lex_into(script, 0, dialect, 0, out, False)
     return out
@@ -792,14 +822,26 @@ class _Launch:
         self.words: "list[str]" = []
         self.pipe = False   # something is piped into a shell
         self.eval = False   # `eval` of generated text
+        #: names of the wrappers in front of a program (`sudo -u root node`)
+        self.prefixes: "set[str]" = set()
+
+
+_scan_memo: "list" = [None, None]
 
 
 def _scan_launch(cfg: dict) -> _Launch:
-    out = _Launch()
+    """What the entry would run. The detectors that read it run one after the
+    other on the same entry, so the last answer is kept: a long script is
+    read once, not once per detector."""
     command = str(cfg.get("command") or "")
     words = ([command] if command else []) + [
         str(a) for a in (cfg.get("args") or [])]
+    key = tuple(words)
+    if _scan_memo[0] == key:
+        return _scan_memo[1]
+    out = _Launch()
     _scan_words(out, words, (), 0)
+    _scan_memo[0], _scan_memo[1] = key, out
     return out
 
 
@@ -812,6 +854,7 @@ def _scan_words(out: _Launch, words: "list[str]", via: "tuple[str, ...]",
         return
     name = _prog_name(words[idx])
     rest = words[idx + 1:]
+    out.prefixes.update(_prog_name(w) for w in words[:idx])
     out.inline.append((name, rest))
     kind = _wrapper_kind(name)
     script = _wrapper_script(kind, rest) if kind else None
@@ -1397,8 +1440,9 @@ def detect_floating_version(name: str, cfg: dict) -> list[dict]:
     for p in _iter_packages(cfg):
         if p.exact:
             continue
-        hint = (f"{p.name}==x.y.z" if p.ecosystem == "PyPI"
-                else f"{p.name}@x.y.z")
+        shown = _echo(p.name)
+        hint = (f"{shown}==x.y.z" if p.ecosystem == "PyPI"
+                else f"{shown}@x.y.z")
         if not p.sure:
             # (the word may be the value of an option, so it is not quoted)
             msg = ("package not shown: an option mcp-audit does not know "
@@ -1407,12 +1451,12 @@ def detect_floating_version(name: str, cfg: dict) -> list[dict]:
                    "launch can pull a different (possibly compromised) one: "
                    "pin it with name@x.y.z")
         elif p.version is None:
-            msg = (f"unpinned package '{p.name}' — every launch can pull "
+            msg = (f"unpinned package '{shown}' — every launch can pull "
                    "a different (possibly compromised) release; pin with "
                    f"{hint}")
         else:
-            msg = (f"package '{p.name}' is not pinned to one release: "
-                   f"'{p.version}' can resolve to a different version on "
+            msg = (f"package '{shown}' is not pinned to one release: "
+                   f"'{_echo(p.version)}' can resolve to a different version on "
                    f"any launch (possibly a compromised one); pin with {hint}")
         if msg not in seen:
             seen.add(msg)
@@ -1519,12 +1563,12 @@ def detect_osv(name: str, cfg: dict, timeout: float = 10) -> list[dict]:
                 vulns = json.load(resp).get("vulns") or []
         except (OSError, ValueError) as e:
             findings.append(_finding("low", "osv-lookup",
-                                     f"OSV lookup for {pkg}@{ver} failed: {e}"))
+                                     f"OSV lookup for {_echo(pkg)}@{_echo(ver)} failed: {e}"))
             continue
         for v in vulns:
             findings.append(_finding(
                 "high", "known-vulnerable",
-                f"{pkg}@{ver} is affected by {v.get('id')} (OSV): "
+                f"{_echo(pkg)}@{_echo(ver)} is affected by {v.get('id')} (OSV): "
                 f"{v.get('summary') or 'see https://osv.dev/' + str(v.get('id'))}"))
     return findings
 
@@ -1556,6 +1600,215 @@ def detect_secret_env(name: str, cfg: dict) -> list[dict]:
     return findings
 
 
+# -- How the server is launched: secrets in args, privileges, temp folders ----
+
+#: Programs that run what follows with more rights than the user has.
+_PRIVILEGE = frozenset({"sudo", "doas", "pkexec", "su", "runas", "gsudo"})
+_CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+#: A value that is a reference or a placeholder, not a credential.
+_REFERENCE_RE = re.compile(r"^\s*(?:\$|%|<|\{\{|\[|@)")
+#: The last word of an option that names where a credential is, not what it is.
+_NOT_A_VALUE = frozenset({"FILE", "PATH", "ENV", "VAR", "DIR", "NAME", "URL",
+                          "ID", "TYPE", "MODE", "ENABLED", "LENGTH", "SIZE",
+                          "LOCATION", "HEADER", "FORMAT", "PROMPT", "STORE",
+                          "HELPER", "PROVIDER", "SOURCE", "REF"})
+_PLAIN_WORDS = frozenset({"true", "false", "none", "null", "yes", "no",
+                          "required", "optional", "enabled", "disabled",
+                          "oauth", "basic", "bearer", "stdin", "prompt"})
+#: A folder every user of the machine can write to.
+_TEMP_RE = re.compile(
+    r"""(?ix)^["']?(?:
+        /(?:private/)?(?:var/)?tmp[/\\]. | /dev/shm[/\\]. |
+        (?:%t(?:e)?mp%|\$\{?t(?:e)?mp(?:dir)?\}?)[/\\]. |
+        [a-z]:\\windows\\temp\\. | [a-z]:\\users\\[^\\]+\\appdata\\local\\temp\\.
+    )""")
+#: Folders under a temporary one that are not reported. Empty; the tests set
+#: it when the checkout they run from is itself in a temporary folder.
+_TEMP_EXEMPT: "tuple[str, ...]" = ()
+_CODE_EXT_RE = re.compile(
+    r"(?i)\.(?:sh|bash|py|js|mjs|cjs|ts|rb|pl|php|jar|exe|bat|cmd|ps1|so|dll"
+    r"|bin|run|appimage)[\"']?$")
+_DANGEROUS_CAPS = frozenset({"ALL", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE",
+                             "SYS_RAWIO", "DAC_READ_SEARCH", "NET_ADMIN"})
+_SENSITIVE_MOUNTS = frozenset({"/", "/etc", "/root", "/proc", "/sys", "/dev",
+                               "/boot", "/var/run", "/run"})
+_HOME_MOUNTS = frozenset({"~", "$home", "${home}", "/home", "/users",
+                          "%userprofile%", "c:\\users", "c:\\"})
+_SECRET_DIRS = ("/.ssh", "/.aws", "/.gnupg", "/.kube", "/.docker", "/.config",
+                "\\.ssh", "\\.aws")
+
+
+def _credential_in(words: "list[str]") -> "tuple[bool, bool]":
+    """(shape, named): is there a word that looks like a well-known credential
+    (ghp_..., sk-..., a JWT, `Bearer ...`), and one that is the value of a
+    credential-named option (`--token abc123`, `--api-key=abc123`,
+    `MY_PASS=abc123`)? Values are never returned."""
+    shape = named = False
+    n = len(words)
+    for i, w in enumerate(words):
+        if redact._TOKEN_SHAPES_RE.search(w) or redact._BEARER_RE.search(w) \
+                or redact._redact_jwts(w) != w:
+            shape = True
+        if named:
+            continue
+        name, value = None, None
+        if w.startswith("-") and "=" in w:
+            name, _, value = w.partition("=")
+        elif w.startswith("-") and i + 1 < n and not words[i + 1].startswith("-"):
+            name, value = w, words[i + 1]
+        elif not w.startswith("-") and "=" in w and re.match(
+                r"[A-Za-z_][A-Za-z0-9_]*=", w):
+            name, _, value = w.partition("=")
+        if name is None or value is None:
+            continue
+        bare = name.lstrip("-")
+        parts = [x.upper() for x in redact._WORD_RE.findall(bare)]
+        if not parts or parts[-1] in _NOT_A_VALUE:
+            continue
+        if name.startswith("-") and not redact.takes_a_credential(name):
+            continue
+        if not name.startswith("-") and not redact.is_secret_name(name):
+            continue
+        value = value.strip().strip("'\"")
+        if (len(value) >= 6 and not _REFERENCE_RE.match(value)
+                and value.lower() not in _PLAIN_WORDS):
+            named = True
+    return shape, named
+
+
+def _mount_sources(args: "list[str]") -> "list[str]":
+    """The host side of every -v/--volume/--mount in a container command."""
+    out = []
+    for i, a in enumerate(args):
+        value = None
+        if a in ("-v", "--volume", "--mount") and i + 1 < len(args):
+            value = args[i + 1]
+        elif a.startswith(("--volume=", "--mount=")):
+            value = a.split("=", 1)[1]
+        elif a.startswith("-v") and len(a) > 2 and not a.startswith("-v="):
+            value = a[2:]
+        if value is None:
+            continue
+        if "source=" in value or "src=" in value:
+            m = re.search(r"(?:^|,)(?:source|src)=([^,]*)", value)
+            if m:
+                out.append(m.group(1))
+        else:
+            # <host>:<container>[:opts]; a Windows drive letter is "C:\"
+            m = re.match(r"([A-Za-z]:[\\/][^:]*|[^:]*)", value)
+            out.append(m.group(1) if m else value)
+    return out
+
+
+def _container_risks(args: "list[str]") -> "list[tuple[str, str]]":
+    """[(severity, what)] for the options of a `docker run` that hand the
+    container the host."""
+    found: "list[tuple[str, str]]" = []
+
+    def option(*names):
+        """The values given to one of these options."""
+        vals = []
+        for i, a in enumerate(args):
+            for nm in names:
+                if a == nm and i + 1 < len(args):
+                    vals.append(args[i + 1])
+                elif a.startswith(nm + "="):
+                    vals.append(a.split("=", 1)[1])
+        return vals
+    if any(a == "--privileged" or a.startswith("--privileged=")
+           and a.split("=", 1)[1].lower() != "false" for a in args):
+        found.append(("high", "--privileged (full access to the host)"))
+    for cap in option("--cap-add"):
+        if cap.upper().removeprefix("CAP_") in _DANGEROUS_CAPS:
+            found.append(("high", f"--cap-add {_echo(cap, 24)}"))
+    for kind in ("--pid", "--userns", "--ipc"):
+        if any(v.lower() == "host" for v in option(kind)):
+            found.append(("high", f"{kind}=host"))
+    if any(v.lower() == "host" for v in option("--net", "--network")):
+        found.append(("medium", "--network=host"))
+    for v in option("--security-opt"):
+        if "unconfined" in v.lower() or "label=disable" in v.lower():
+            found.append(("high", "--security-opt with the sandbox turned off"))
+    if option("--device"):
+        found.append(("medium", "--device (a host device)"))
+    for src in _mount_sources(args):
+        norm = src.strip("'\"").rstrip("/\\") or "/"
+        low = norm.lower()
+        if low.endswith((".sock",)) and "docker" in low or \
+                low.endswith(("podman.sock", "containerd.sock", "crio.sock")):
+            found.append(("high", "the container runtime's socket (control of "
+                                  "every container and the host)"))
+        elif norm in _SENSITIVE_MOUNTS or any(
+                d in norm for d in _SECRET_DIRS):
+            found.append(("high", f"a mount of '{_echo(norm, 40)}'"))
+        elif low in _HOME_MOUNTS:
+            found.append(("medium", "a mount of the home directory"))
+    return found
+
+
+def detect_risky_launch(name: str, cfg: dict) -> list[dict]:
+    """How the server is started: a credential written into its arguments
+    (visible to every process on the machine and kept in the config), extra
+    privileges (`sudo`, a privileged or host-mounting container) and code
+    that sits in a folder anyone can write to."""
+    try:
+        scan = _scan_launch(cfg)
+    except _TooComplex:
+        return []   # detect_suspicious_command reports it
+    findings = []
+    command = str(cfg.get("command") or "")
+    words = ([command] if command else []) + [
+        str(a) for a in (cfg.get("args") or [])]
+    # the args as the config gives them, and as a script's commands do
+    shape, named = _credential_in(words + [w for w in scan.words
+                                           if w not in words])
+    if shape:
+        findings.append(_finding(
+            "high", "secret-in-args",
+            "an argument holds what looks like a live credential (a token "
+            "or key written into the command line) — it is visible to every "
+            "process on the machine; pass it through the environment or a "
+            "secret store"))
+    elif named:
+        findings.append(_finding(
+            "medium", "secret-in-args",
+            "a credential-named option (--token, --api-key, --password ...) "
+            "is given its value in the arguments — it is visible to every "
+            "process on the machine; pass it through the environment or a "
+            "secret store"))
+    boss = sorted((set(p for p, _ in scan.programs) | scan.prefixes)
+                  & _PRIVILEGE)
+    if boss:
+        findings.append(_finding(
+            "high", "privileged-launch",
+            f"server is started with {_names(boss)} — it runs with more "
+            "rights than your own account; a server should not need them"))
+    for prog, args in scan.launches:
+        if prog in _CONTAINER_RUNTIMES and any(
+                a in ("run", "create") for a in args):
+            risks = _container_risks(args)
+            for sev in ("high", "medium"):
+                said = [w for s_, w in risks if s_ == sev]
+                if said:
+                    findings.append(_finding(
+                        sev, "container-escape",
+                        f"'{prog}' starts the server with host access: "
+                        + "; ".join(dict.fromkeys(said))))
+    temp = []
+    for w in words + [x for x in scan.words if x not in words]:
+        if (_TEMP_RE.match(w) and not w.startswith(_TEMP_EXEMPT)
+                and (w == command or _CODE_EXT_RE.search(w))):
+            temp.append(w)
+    if temp:
+        findings.append(_finding(
+            "high", "temp-binary",
+            "server runs code from a temporary folder "
+            f"('{_echo(temp[0], 40)}') that other users and programs can "
+            "write to — anyone who can replace that file controls the "
+            "server"))
+    return findings
+
+
 STATIC_DETECTORS = (
     detect_unauditable,
     detect_suspicious_command,
@@ -1563,6 +1816,7 @@ STATIC_DETECTORS = (
     detect_known_bad,
     detect_floating_version,
     detect_secret_env,
+    detect_risky_launch,
 )
 
 
@@ -1574,6 +1828,7 @@ DETECTOR_SUBJECT = {
     "detect_known_bad": "known-vulnerable packages",
     "detect_floating_version": "package pinning",
     "detect_secret_env": "secrets in env",
+    "detect_risky_launch": "how the server is launched",
 }
 
 

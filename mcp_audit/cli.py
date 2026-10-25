@@ -48,6 +48,7 @@ def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
 
 def _audit_all(discovered: list[dict], advisories: list[dict],
                online: bool, allow_hosts=()) -> list[dict]:
+    detectors.reset_work_budget()
     return [_audit_one(name, cfg, d, advisories, online, allow_hosts)
             for d in discovered for name, cfg in d["servers"].items()]
 

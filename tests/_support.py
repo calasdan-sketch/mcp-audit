@@ -20,6 +20,12 @@ from mcp_audit import discovery
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
+# A checkout that sits in a temporary folder (/tmp/...) would have its own
+# fixture servers reported as "runs code from a temporary folder".
+from mcp_audit import detectors as _detectors  # noqa: E402
+if _detectors._TEMP_RE.match(FIX + os.sep + "x.py"):
+    _detectors._TEMP_EXEMPT = (os.path.dirname(FIX) + os.sep,)
+
 # Everything the tests make in the temporary directory (their own, the fake
 # home, the empty directory --deep starts servers in) goes under one private
 # directory that is removed when the test process ends, instead of piling up
