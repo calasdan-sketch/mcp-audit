@@ -71,13 +71,39 @@ class TestJwtScanIsLinear(unittest.TestCase):
             want = redact._JWT_REFERENCE_RE.sub(redact.REDACTED, text)
             self.assertEqual(redact._redact_jwts(text), want, repr(text))
 
-    def test_the_segment_limits_of_the_pattern_hold(self):
-        ok = "eyJ" + "a" * 4096 + "." + "b" * 4096 + ".c"
-        self.assertEqual(redact._redact_jwts(ok), redact.REDACTED)
-        for bad in ("eyJ" + "a" * 4097 + "." + "b" * 8 + ".c",
-                    "eyJ" + "a" * 8 + "." + "b" * 4097 + ".c",
-                    "eyJ" + "a" * 7 + "." + "b" * 8 + ".c"):
+    def test_the_segment_minimums_of_the_pattern_hold(self):
+        for bad in ("eyJ" + "a" * 7 + "." + "b" * 8 + ".c",
+                    "eyJ" + "a" * 8 + "." + "b" * 7 + ".c",
+                    "eyJ" + "a" * 20 + ".b"):
             self.assertEqual(redact._redact_jwts(bad), bad)
+
+    def test_a_segment_of_any_length_is_redacted(self):
+        """HIGH (round 10): a cap of 4096 per segment made a long token
+        (large claims) pass through unchanged."""
+        for n in (4096, 4097, 5000, 100000):
+            for text in ("eyJ" + "a" * 20 + "." + "b" * n + ".c" * 20,
+                         "eyJ" + "a" * n + "." + "b" * 20 + ".c",
+                         "x eyJ" + "a" * 20 + "." + "b" * n + ".c" * 20):
+                self.assertNotIn("eyJ", redact.redact_text(text), n)
+                self.assertNotIn("b" * 50, redact.redact_text(text), n)
+        self.assertEqual(
+            redact.redact_text("x eyJ" + "a" * 20 + "." + "b" * 5000
+                               + ".c" * 20),
+            "x " + redact.REDACTED + ".c" * 19)
+
+    def test_long_segments_match_the_reference_pattern(self):
+        for text in ("eyJ" + "a" * 5000 + "." + "b" * 5000 + ".cc",
+                     "q eyJ" + "a" * 9 + "." + "b" * 6000 + ".",
+                     "eyJ" + "a" * 4097 + "." + "b" * 8 + ".c"):
+            want = redact._JWT_REFERENCE_RE.sub(redact.REDACTED, text)
+            self.assertEqual(redact._redact_jwts(text), want)
+
+    def test_long_segments_stay_linear(self):
+        block = "eyJ" + "a" * 5000 + "." + "b" * 5000 + ".c "
+        small = seconds(redact.redact_text, block * 200)
+        large = seconds(redact.redact_text, block * 800)
+        self.assertLess(large, max(small, 0.005) * 9,
+                        "n: %.3f s, 4n: %.3f s" % (small, large))
 
     def test_a_real_looking_token_is_still_redacted(self):
         jwt = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."

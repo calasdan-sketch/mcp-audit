@@ -820,6 +820,9 @@ class _Launch:
         #: the words of every plain command inside a script, as the shell
         #: hands them over (quotes taken out)
         self.words: "list[str]" = []
+        #: the program word of every plain command (`/tmp/evil` in
+        #: `sh -c /tmp/evil`), as the shell hands it over
+        self.progwords: "list[str]" = []
         self.pipe = False   # something is piped into a shell
         self.eval = False   # `eval` of generated text
         #: names of the wrappers in front of a program (`sudo -u root node`)
@@ -867,6 +870,7 @@ def _scan_words(out: _Launch, words: "list[str]", via: "tuple[str, ...]",
     # it is judged as the program it is.
     out.programs.append((name, via))
     out.launches.append((name, rest))
+    out.progwords.append(words[idx])
     if via:
         out.words.extend(words)
     if not via and _raw_pipe_to_shell(" ".join(words)):
@@ -1612,6 +1616,25 @@ _NOT_A_VALUE = frozenset({"FILE", "PATH", "ENV", "VAR", "DIR", "NAME", "URL",
                           "ID", "TYPE", "MODE", "ENABLED", "LENGTH", "SIZE",
                           "LOCATION", "HEADER", "FORMAT", "PROMPT", "STORE",
                           "HELPER", "PROVIDER", "SOURCE", "REF"})
+#: A word anywhere in an option's name that says it holds an amount, not a
+#: credential: --max-tokens, --token-limit, --token-ttl, --retry-count.
+_AMOUNT_WORDS = frozenset({"LIMIT", "LIMITS", "MAX", "MIN", "COUNT", "TTL",
+                           "TIMEOUT", "EXPIRY", "EXPIRES", "LIFETIME",
+                           "BUDGET", "THRESHOLD", "QUOTA", "RATE"})
+_DIGITS_RE = re.compile(r"[0-9][0-9_,.]*")
+#: `scheme://user:password@host`: the password is group 1.
+_URL_PASSWORD_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^/\s:@?#]*:([^/\s@?#]+)@")
+#: Programs whose short option hands the next word, or the rest of the same
+#: word, to them as a password: `sshpass -p hunter22`, `mysql -phunter22`,
+#: `redis-cli -a hunter22`, `curl -u me:hunter22`. (`mysql -p hunter22` makes
+#: hunter22 a database name, and `psql -p 5432` is a port: neither is here.)
+_PASSWORD_SHORT = {
+    "sshpass": ("-p", True), "mongosh": ("-p", True), "mongo": ("-p", True),
+    "redis-cli": ("-a", True), "mysql": ("-p", False),
+    "mysqldump": ("-p", False), "mysqladmin": ("-p", False),
+    "mariadb": ("-p", False), "mysqlsh": ("-p", False),
+}
 _PLAIN_WORDS = frozenset({"true", "false", "none", "null", "yes", "no",
                           "required", "optional", "enabled", "disabled",
                           "oauth", "basic", "bearer", "stdin", "prompt"})
@@ -1619,23 +1642,27 @@ _PLAIN_WORDS = frozenset({"true", "false", "none", "null", "yes", "no",
 _TEMP_RE = re.compile(
     r"""(?ix)^["']?(?:
         /(?:private/)?(?:var/)?tmp[/\\]. | /dev/shm[/\\]. |
+        /(?:private/)?var/folders/. |
         (?:%t(?:e)?mp%|\$\{?t(?:e)?mp(?:dir)?\}?)[/\\]. |
-        [a-z]:\\windows\\temp\\. | [a-z]:\\users\\[^\\]+\\appdata\\local\\temp\\.
+        [a-z]:[/\\]windows[/\\]temp[/\\]. |
+        [a-z]:[/\\]users[/\\][^/\\]+[/\\]appdata[/\\]local[/\\]temp[/\\].
     )""")
 #: Folders under a temporary one that are not reported. Empty; the tests set
 #: it when the checkout they run from is itself in a temporary folder.
 _TEMP_EXEMPT: "tuple[str, ...]" = ()
 _CODE_EXT_RE = re.compile(
     r"(?i)\.(?:sh|bash|py|js|mjs|cjs|ts|rb|pl|php|jar|exe|bat|cmd|ps1|so|dll"
-    r"|bin|run|appimage)[\"']?$")
+    r"|run|appimage|whl|tgz|tar\.gz|egg)[\"']?$")
 _DANGEROUS_CAPS = frozenset({"ALL", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE",
                              "SYS_RAWIO", "DAC_READ_SEARCH", "NET_ADMIN"})
 _SENSITIVE_MOUNTS = frozenset({"/", "/etc", "/root", "/proc", "/sys", "/dev",
                                "/boot", "/var/run", "/run"})
 _HOME_MOUNTS = frozenset({"~", "$home", "${home}", "/home", "/users",
                           "%userprofile%", "c:\\users", "c:\\"})
-_SECRET_DIRS = ("/.ssh", "/.aws", "/.gnupg", "/.kube", "/.docker", "/.config",
-                "\\.ssh", "\\.aws")
+#: Folders (whole path segments) that hold credentials: a mount of
+#: /home/me/.config/x is one, a mount of /srv/.configs is not.
+_SECRET_DIRS = frozenset((".ssh", ".aws", ".gnupg", ".kube", ".docker",
+                          ".config"))
 
 
 def _credential_in(words: "list[str]") -> "tuple[bool, bool]":
@@ -1651,6 +1678,10 @@ def _credential_in(words: "list[str]") -> "tuple[bool, bool]":
             shape = True
         if named:
             continue
+        m = _URL_PASSWORD_RE.search(w)
+        if m and _plausible_secret(m.group(1)):
+            named = True
+            continue
         name, value = None, None
         if w.startswith("-") and "=" in w:
             name, _, value = w.partition("=")
@@ -1665,15 +1696,65 @@ def _credential_in(words: "list[str]") -> "tuple[bool, bool]":
         parts = [x.upper() for x in redact._WORD_RE.findall(bare)]
         if not parts or parts[-1] in _NOT_A_VALUE:
             continue
+        if _AMOUNT_WORDS.intersection(parts):
+            continue
         if name.startswith("-") and not redact.takes_a_credential(name):
             continue
         if not name.startswith("-") and not redact.is_secret_name(name):
             continue
         value = value.strip().strip("'\"")
-        if (len(value) >= 6 and not _REFERENCE_RE.match(value)
-                and value.lower() not in _PLAIN_WORDS):
+        # `--tokens 250000` counts tokens; `--token 250000` is still a token
+        if parts[-1] == "TOKENS" and _DIGITS_RE.fullmatch(value):
+            continue
+        if _plausible_secret(value):
             named = True
+    if not named:
+        named = _short_password(words)
     return shape, named
+
+
+def _plausible_secret(value: str) -> bool:
+    """A value long enough to be a credential that is not a reference
+    ($TOKEN, %TOKEN%, <your-token>) or a plain word (true, oauth)."""
+    value = value.strip().strip("'\"")
+    return (len(value) >= 6 and not _REFERENCE_RE.match(value)
+            and value.lower() not in _PLAIN_WORDS)
+
+
+def _short_password(words: "list[str]") -> bool:
+    """Is a password given to a known program as its short option (see
+    _PASSWORD_SHORT)? `curl -u user:password` is the other shape."""
+    prog = None
+    for i, w in enumerate(words):
+        base = _prog_name(w) if not w.startswith("-") else ""
+        if base in _PASSWORD_SHORT or base == "curl":
+            prog = base
+            rest = words[i + 1:]
+            break
+    if prog is None:
+        return False
+    if prog == "curl":
+        for j, w in enumerate(rest):
+            value = None
+            if w in ("-u", "--user") and j + 1 < len(rest):
+                value = rest[j + 1]
+            elif w.startswith("--user="):
+                value = w.split("=", 1)[1]
+            elif w.startswith("-u") and not w.startswith("--") and len(w) > 2:
+                value = w[2:]
+            if value and ":" in value and _plausible_secret(
+                    value.split(":", 1)[1]):
+                return True
+        return False
+    opt, separate = _PASSWORD_SHORT[prog]
+    for j, w in enumerate(rest):
+        if w == opt and separate and j + 1 < len(rest):
+            if _plausible_secret(rest[j + 1]) and not rest[j + 1].startswith("-"):
+                return True
+        elif w.startswith(opt) and len(w) > len(opt) and w[2] != "-":
+            if _plausible_secret(w[len(opt):]):
+                return True
+    return False
 
 
 def _mount_sources(args: "list[str]") -> "list[str]":
@@ -1681,7 +1762,11 @@ def _mount_sources(args: "list[str]") -> "list[str]":
     out = []
     for i, a in enumerate(args):
         value = None
-        if a in ("-v", "--volume", "--mount") and i + 1 < len(args):
+        if (a in ("-v", "--volume", "--mount") or (
+                len(a) > 2 and a.startswith("-") and not a.startswith("--")
+                and a.endswith("v")
+                and all(c in _RUN_SHORT_SWITCHES for c in a[1:-1]))
+                ) and i + 1 < len(args):     # -v, or -itv
             value = args[i + 1]
         elif a.startswith(("--volume=", "--mount=")):
             value = a.split("=", 1)[1]
@@ -1700,10 +1785,61 @@ def _mount_sources(args: "list[str]") -> "list[str]":
     return out
 
 
+#: `docker run` options that are switches: they take no value.
+_RUN_SWITCHES = frozenset({
+    "--privileged", "--rm", "--init", "--read-only", "--interactive",
+    "--tty", "--detach", "--sig-proxy", "--oom-kill-disable",
+    "--no-healthcheck", "--publish-all", "--quiet", "--disable-content-trust",
+    "--help"})
+_RUN_SHORT_SWITCHES = frozenset("itdPq")
+#: ...and short options that take one (`-v a:b`, `-vA:B`, `-eX=1`).
+_RUN_SHORT_VALUES = frozenset("vepuwlmhacgnsx")
+
+
+def _run_options(args: "list[str]") -> "list[str]":
+    """The options of a `docker run` / `create`, up to the image: everything
+    after the image name is the container's own command line (`docker run img
+    --privileged` hands --privileged to the program in the container).
+
+    An option this does not know, followed by a word that is not an option, is
+    taken to have that word as its value. That can only make the image appear
+    later than it is, never earlier, so a risky option is never skipped."""
+    start = next((i for i, a in enumerate(args) if a in ("run", "create")),
+                 None)
+    if start is None:
+        return list(args)
+    out = list(args[:start + 1])
+    i, n = start + 1, len(args)
+    while i < n:
+        a = args[i]
+        if a == "--" or not a.startswith("-") or a == "-":
+            break               # `--`, or the image
+        out.append(a)
+        i += 1
+        if a.startswith("--"):
+            if "=" in a or a in _RUN_SWITCHES:
+                continue
+        else:
+            letters = a[1:]
+            if letters and letters[0] in _RUN_SHORT_VALUES and len(a) > 2:
+                continue        # -vA:B, -eX=1: the value is attached
+            if letters and all(c in _RUN_SHORT_SWITCHES for c in letters):
+                continue        # -it, -d
+        if i < n and not args[i].startswith("-"):
+            out.append(args[i])  # its value
+            i += 1
+    return out
+
+
+def _segments(path: str) -> "list[str]":
+    return [x for x in re.split(r"[/\\]+", path.lower()) if x]
+
+
 def _container_risks(args: "list[str]") -> "list[tuple[str, str]]":
     """[(severity, what)] for the options of a `docker run` that hand the
     container the host."""
     found: "list[tuple[str, str]]" = []
+    args = _run_options(args)
 
     def option(*names):
         """The values given to one of these options."""
@@ -1738,12 +1874,29 @@ def _container_risks(args: "list[str]") -> "list[tuple[str, str]]":
                 low.endswith(("podman.sock", "containerd.sock", "crio.sock")):
             found.append(("high", "the container runtime's socket (control of "
                                   "every container and the host)"))
-        elif norm in _SENSITIVE_MOUNTS or any(
-                d in norm for d in _SECRET_DIRS):
+        elif norm in _SENSITIVE_MOUNTS or _SECRET_DIRS.intersection(
+                _segments(norm)):
             found.append(("high", f"a mount of '{_echo(norm, 40)}'"))
         elif low in _HOME_MOUNTS:
             found.append(("medium", "a mount of the home directory"))
     return found
+
+
+def _temp_candidates(word: str) -> "list[str]":
+    """The paths a word may hold: the word, the value of `--opt=value`, and
+    the path inside a file:// URL."""
+    out = [word]
+    if word.startswith("-") and "=" in word:
+        out.append(word.split("=", 1)[1])
+    for w in list(out):
+        if w.lower().lstrip("'\"").startswith("file://"):
+            path = w.lstrip("'\"")[7:]
+            if path.lower().startswith("localhost/"):
+                path = path[9:]
+            if re.match(r"/[A-Za-z]:[/\\]", path):    # file:///C:/...
+                path = path[1:]
+            out.append(path)
+    return out
 
 
 def detect_risky_launch(name: str, cfg: dict) -> list[dict]:
@@ -1772,8 +1925,9 @@ def detect_risky_launch(name: str, cfg: dict) -> list[dict]:
     elif named:
         findings.append(_finding(
             "medium", "secret-in-args",
-            "a credential-named option (--token, --api-key, --password ...) "
-            "is given its value in the arguments — it is visible to every "
+            "a credential (the value of --token, --api-key, --password ..., "
+            "or a password inside a URL) is written in the arguments — it is "
+            "visible to every "
             "process on the machine; pass it through the environment or a "
             "secret store"))
     boss = sorted((set(p for p, _ in scan.programs) | scan.prefixes)
@@ -1795,10 +1949,13 @@ def detect_risky_launch(name: str, cfg: dict) -> list[dict]:
                         f"'{prog}' starts the server with host access: "
                         + "; ".join(dict.fromkeys(said))))
     temp = []
+    progs = {command} | set(scan.progwords)
     for w in words + [x for x in scan.words if x not in words]:
-        if (_TEMP_RE.match(w) and not w.startswith(_TEMP_EXEMPT)
-                and (w == command or _CODE_EXT_RE.search(w))):
-            temp.append(w)
+        for cand in _temp_candidates(w):
+            if (_TEMP_RE.match(cand) and not cand.startswith(_TEMP_EXEMPT)
+                    and (w in progs or _CODE_EXT_RE.search(cand))):
+                temp.append(cand)
+                break
     if temp:
         findings.append(_finding(
             "high", "temp-binary",

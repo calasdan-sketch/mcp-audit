@@ -57,15 +57,14 @@ _TOKEN_SHAPES_RE = re.compile("|".join((
 #: two to the same answers); not used on real input, because a text of
 #: "eyJaaaaaaaaa-" repeated makes every start scan the rest of the run.
 _JWT_REFERENCE_RE = re.compile(
-    r"\beyJ[A-Za-z0-9_\-]{8,4096}\.[A-Za-z0-9_\-]{8,4096}\.[A-Za-z0-9_\-]*")
+    r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]*")
 _JWT_START_RE = re.compile(r"\beyJ")
 _JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]+")
-_JWT_SEGMENT_MAX = 4096
 _BEARER_RE = re.compile(r"(?i)\b(bearer|basic)(\s+)[A-Za-z0-9._~+/=\-]{8,}")
 
 
 def _redact_jwts(text: str) -> str:
-    """`text` with each JSON Web Token (eyJ<8-4096>.<8-4096>.<rest>, see
+    """`text` with each JSON Web Token (eyJ<8+>.<8+>.<rest>, see
     _JWT_REFERENCE_RE) replaced. Linear in the length of the text: the runs of
     token characters are found once, and each candidate start looks only at
     the run it is in and the next two."""
@@ -83,14 +82,12 @@ def _redact_jwts(text: str) -> str:
         if j < 0:
             continue
         end1 = runs[j][1]
-        if not (8 <= end1 - (i + 3) <= _JWT_SEGMENT_MAX) \
-                or text[end1:end1 + 1] != ".":
+        if end1 - (i + 3) < 8 or text[end1:end1 + 1] != ".":
             continue
         if j + 1 >= len(runs) or starts[j + 1] != end1 + 1:
             continue
         end2 = runs[j + 1][1]
-        if not (8 <= end2 - (end1 + 1) <= _JWT_SEGMENT_MAX) \
-                or text[end2:end2 + 1] != ".":
+        if end2 - (end1 + 1) < 8 or text[end2:end2 + 1] != ".":
             continue
         end3 = end2 + 1
         if j + 2 < len(runs) and starts[j + 2] == end3:

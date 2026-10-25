@@ -23,8 +23,17 @@ FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 # A checkout that sits in a temporary folder (/tmp/...) would have its own
 # fixture servers reported as "runs code from a temporary folder".
 from mcp_audit import detectors as _detectors  # noqa: E402
+# The same goes for the interpreter the tests run under (a virtual environment
+# made in /tmp is the usual way to test a built wheel).
+import sys as _sys  # noqa: E402
+_exempt = []
 if _detectors._TEMP_RE.match(FIX + os.sep + "x.py"):
-    _detectors._TEMP_EXEMPT = (os.path.dirname(FIX) + os.sep,)
+    _exempt.append(os.path.dirname(FIX) + os.sep)
+for _exe in {_sys.executable, os.path.realpath(_sys.executable)}:
+    if _exe and _detectors._TEMP_RE.match(_exe):
+        _exempt.append(os.path.dirname(_exe) + os.sep)
+        _exempt.append(os.path.dirname(os.path.dirname(_exe)) + os.sep)
+_detectors._TEMP_EXEMPT = tuple(_exempt)
 
 # Everything the tests make in the temporary directory (their own, the fake
 # home, the empty directory --deep starts servers in) goes under one private

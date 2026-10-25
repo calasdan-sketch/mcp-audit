@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.5
+
+- **Fixed: every release failed.** The release workflow's version check was a
+  YAML plain value that folds into one line, so the script never ran. It is a
+  block (`run: |`) now, and a test reads the workflow, runs the checks with a
+  faked tag and commit, and fails if a `run:` ever folds again.
+- The release workflow also refuses a tag whose commit is not on `main`, and
+  runs the tests from the built sdist (CI does the same on every change, and
+  also runs Python 3.14).
+- **Fixed: a secret scrubber that failed open.** A JSON Web Token with a part
+  longer than 4096 characters was printed as it was. The limit is gone; the
+  scan is still linear (a 5-million-character case is covered).
+- Fewer false alarms: `--max-tokens 100000`, `--token-limit`, `--tokens` and
+  other options that hold an amount are no longer reported as a secret in the
+  arguments; a mount of `/srv/.dockerfiles` or `/data/my.configs` is not a
+  mount of `~/.docker` or `~/.config` (whole folder names are compared); and
+  options after the image name (`docker run img --privileged`) belong to the
+  program in the container, not to Docker. A data file named `.bin` is not code.
+- Fewer misses: macOS per-user temporary folders (`/var/folders`,
+  `/private/var/folders`), `sh -c /tmp/evil`, `uvx --from /tmp/x.whl`,
+  `file:///tmp/x.js`, Windows paths with `/`, a password in a URL argument
+  (`postgres://user:pass@host/db`) and the short password options of
+  `sshpass -p`, `mysql -pSECRET`, `redis-cli -a` and `curl -u user:pw`.
+- Tests no longer depend on where the Python interpreter is installed.
+
 ## 0.2.4
 
 - **Fixed a hang:** the JSON Web Token pattern in the secret scrubber took time
