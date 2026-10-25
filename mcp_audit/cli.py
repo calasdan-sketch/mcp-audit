@@ -25,12 +25,13 @@ from . import scoring
 
 
 def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
-               online: bool = False, allow_hosts=()) -> dict:
+               online: bool = False, allow_hosts=(), campaigns=None) -> dict:
     """Statically audit one server entry of a discovered group (see
     discovery). Nothing is launched here: that is the --deep step.
     `allow_hosts`: --allow-host, as detectors.host_pattern() writes them."""
     client, path = group["client"], group["path"]
-    findings = detectors.audit_server(name, cfg, advisories, allow_hosts)
+    findings = detectors.audit_server(name, cfg, advisories, allow_hosts,
+                                      campaigns)
     if online:
         findings.extend(detectors.detect_osv(name, cfg))
     tools: list[dict] = []
@@ -47,9 +48,10 @@ def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
 
 
 def _audit_all(discovered: list[dict], advisories: list[dict],
-               online: bool, allow_hosts=()) -> list[dict]:
+               online: bool, allow_hosts=(), campaigns=None) -> list[dict]:
     detectors.reset_work_budget()
-    return [_audit_one(name, cfg, d, advisories, online, allow_hosts)
+    return [_audit_one(name, cfg, d, advisories, online, allow_hosts,
+                       campaigns)
             for d in discovered for name, cfg in d["servers"].items()]
 
 
@@ -186,7 +188,7 @@ def _held_text(reasons: list[str]) -> str:
 
 
 def _deep_pass(results: list[dict], probe_critical: bool,
-               probe_project: bool) -> None:
+               probe_project: bool, flag: str = "--deep") -> None:
     """The --deep step: launch the servers that may be launched, read their
     tool descriptions, fold what they say into `results`.
 
@@ -218,7 +220,7 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                  if id(r) not in held_back and id(r) not in off
                  and deep_mod.not_launchable(r["config"]) is None}
     if launching:
-        _note(f"--deep will now LAUNCH {len(launching)} MCP server(s) on this "
+        _note(f"{flag} will now LAUNCH {len(launching)} MCP server(s) on this "
               "machine, with your user rights, and talk to them over stdio. "
               "A server can do anything you can: only go on if you would "
               "run these yourself. Each one starts in an empty temporary "
@@ -232,10 +234,10 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                 _note(_launch_line(r))
     for r in results:
         if id(r) in held_back:
-            _note(f"--deep leaves '{r['name']}' <{r['client']}> from "
+            _note(f"{flag} leaves '{r['name']}' <{r['client']}> from "
                   f"{r['path']} alone: {_held_text(holds[id(r)])}")
         if id(r) in off:
-            _note(f"--deep skips '{r['name']}' <{r['client']}> from "
+            _note(f"{flag} skips '{r['name']}' <{r['client']}> from "
                   f"{r['path']}: {_off_text(r, off[id(r)])}")
     sys.stderr.flush()
     with deep_mod.stop_on_signals():
@@ -258,8 +260,11 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                 r["config"],
                 cwd=os.getcwd() if _starts_in_the_project(r) else None)
             new: list[dict] = []
+            r["probe_complete"] = False
             if probe["ok"]:
                 r["tools"] = probe["tools"]
+                r["raw_tools"] = probe.get("raw_tools")
+                r["probe_complete"] = bool(probe.get("complete"))
                 r["deep_read"] = len(probe["tools"])
                 new += deep_mod.audit_descriptions(probe["tools"],
                                                    probe.get("server"))
@@ -571,7 +576,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="mcp-audit",
         description="Audit installed MCP servers: prompt-injection, "
                     "exfiltration endpoints, known-vulnerable versions, "
-                    "floating pins, secret env vars.")
+                    "floating pins, secret env vars.",
+        epilog="other commands: `mcp-audit lock` writes mcp.lock, a record "
+               "of every tool each server lists; `mcp-audit verify` checks "
+               "the servers against it and exits 1 if a tool changed (a "
+               "'rug pull'); `mcp-audit who-added` shows which git commit "
+               "added each server. Each has its own --help.")
     p.add_argument("--config", action="append", default=None,
                    help="Explicit config file to audit (repeatable). "
                         "Default: auto-discover Claude Code (+project "
@@ -630,6 +640,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "reported. There is no config file: give it on every "
                         "run. Without it only the hosts built in are "
                         "trusted (the README lists them).")
+    p.add_argument("--ioc-feed", action="append", default=[], metavar="FILE",
+                   help="Also match the indicators in FILE (repeatable) - "
+                        "the format of the built-in iocs.json: campaigns "
+                        "with hosts, files, repositories and server names "
+                        "that a public report lists.")
     p.add_argument("--format", choices=("human", "json", "sarif"),
                    default="human")
     p.add_argument("--fix", action="store_true",
@@ -851,7 +866,16 @@ def main(argv: list[str] | None = None) -> int:
             return _crash(e)
 
 
+_SUBCOMMANDS = ("lock", "verify", "who-added")
+
+
 def _main(argv: list[str] | None) -> int:
+    given = sys.argv[1:] if argv is None else list(argv)
+    if given[:1] and given[0] in _SUBCOMMANDS:
+        from . import lockcmd
+        run = {"lock": lockcmd.cmd_lock, "verify": lockcmd.cmd_verify,
+               "who-added": lockcmd.cmd_who_added}[given[0]]
+        return run(given[1:])
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.remove and not args.fix:
@@ -884,7 +908,16 @@ def _main(argv: list[str] | None) -> int:
         return 2
 
     allow_hosts = tuple(dict.fromkeys(args.allow_host))
-    results = _audit_all(discovered, advisories, args.online, allow_hosts)
+    campaigns = None
+    if args.ioc_feed:
+        from . import iocs
+        try:
+            campaigns = iocs.load_feed(args.ioc_feed)
+        except iocs.IocFeedError as e:
+            _note(f"error: {e}")
+            return 2
+    results = _audit_all(discovered, advisories, args.online, allow_hosts,
+                         campaigns)
 
     fix_failed = False
     if args.fix:
@@ -893,7 +926,8 @@ def _main(argv: list[str] | None) -> int:
             return stop
         # re-audit so the report reflects reality
         discovered, warnings = discovery.discover(args.config)
-        results = _audit_all(discovered, advisories, args.online, allow_hosts)
+        results = _audit_all(discovered, advisories, args.online, allow_hosts,
+                             campaigns)
 
     if args.deep:  # after --fix: once, and never a server --fix just removed
         _deep_pass(results, args.probe_critical, args.probe_project)

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0
+
+- **Catch a "rug pull" (a server that changes its tool descriptions after you
+  approved it).** `mcp-audit lock` writes `mcp.lock`, a SHA-256 of every tool
+  each configured server lists (name, description and input schema; the file
+  holds hashes, not text). `mcp-audit verify` compares the servers as they are
+  now and exits 1 on drift, telling apart a new tool, a changed description, a
+  changed schema, a changed command and a new server; a removed tool or server
+  and changed annotations are hints. The tool lists come from a file
+  (`--from-tools-json`, nothing is launched) or, only when you pass
+  `--launch`, from the servers themselves (that runs them, and says which
+  first). `lock` never overwrites an existing lockfile whose approvals would
+  change unless `--accept-changes` is given. The format is specified in
+  `docs/LOCKFILE.md` and shared with mcp-jail 0.7.0 (`--lockfile`).
+- `mcp-audit who-added`: which git commit and author first put each server
+  into a config file (local history only; git is told to run nothing the
+  repository names).
+- `known-ioc` check and `--ioc-feed FILE`: a bundled, versioned feed of
+  indicators from public campaign reports. It holds the six indicators of the
+  Deadbugz report (Pillar Security, 12 Aug 2026) that appear in its table, and
+  nothing else.
+- A GitHub Actions workflow example (`examples/github-action.yml`) and
+  pre-commit hooks (`.pre-commit-hooks.yaml`); the README says how to run
+  mcp-audit without installing it (`uvx`, `pipx run`).
+- `--deep`'s probe keeps the tools exactly as the server sent them, which
+  `lock --launch` uses.
+
 ## 0.2.5
 
 - **Fixed: every release failed.** The release workflow's version check was a

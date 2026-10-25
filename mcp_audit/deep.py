@@ -450,6 +450,7 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
     server = _server_texts(answer.get("result"))
     _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     tools: list[dict] = []
+    raw: list = []     # the tools as the server sent them (for the lockfile)
     note = None
     cursor = None
     for page in range(MAX_PAGES):
@@ -469,6 +470,7 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
             if len(tools) >= MAX_TOOLS:
                 note = f"only the first {MAX_TOOLS} tools were scanned"
                 break
+            raw.append(tool)
             if isinstance(tool, dict):
                 entry = {"name": _text(tool.get("name")),
                          "description": _text(tool.get("description"))}
@@ -494,7 +496,8 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
     else:
         note = f"the tool list has more than {MAX_PAGES} pages; the rest " \
                "were not scanned"
-    return {"ok": True, "tools": tools, "server": server, "error": note}
+    return {"ok": True, "tools": tools, "server": server, "error": note,
+            "raw_tools": raw, "complete": note is None}
 
 
 def _failure(error: str) -> dict:

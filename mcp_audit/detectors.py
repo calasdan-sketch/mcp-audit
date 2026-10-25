@@ -1966,6 +1966,14 @@ def detect_risky_launch(name: str, cfg: dict) -> list[dict]:
     return findings
 
 
+def detect_known_ioc(name: str, cfg: dict, campaigns=None) -> list[dict]:
+    """An indicator from a published campaign report (iocs.json)."""
+    from . import iocs
+    return iocs.findings(name, cfg,
+                         iocs.default_feed() if campaigns is None
+                         else campaigns)
+
+
 STATIC_DETECTORS = (
     detect_unauditable,
     detect_suspicious_command,
@@ -1974,6 +1982,7 @@ STATIC_DETECTORS = (
     detect_floating_version,
     detect_secret_env,
     detect_risky_launch,
+    detect_known_ioc,
 )
 
 
@@ -1986,6 +1995,7 @@ DETECTOR_SUBJECT = {
     "detect_floating_version": "package pinning",
     "detect_secret_env": "secrets in env",
     "detect_risky_launch": "how the server is launched",
+    "detect_known_ioc": "known campaign indicators",
 }
 
 
@@ -2005,7 +2015,7 @@ def _config_problem(cfg) -> str | None:
 
 def audit_server(name: str, cfg: dict,
                  advisories: list[dict] | None = None,
-                 allow_hosts=()) -> list[dict]:
+                 allow_hosts=(), campaigns=None) -> list[dict]:
     """Run all static detectors against one server entry. `allow_hosts`: the
     hosts the user trusts (--allow-host), as host_pattern() writes them.
 
@@ -2025,6 +2035,8 @@ def audit_server(name: str, cfg: dict,
                 findings.extend(det(name, cfg, advisories))
             elif det is detect_exfiltration:
                 findings.extend(det(name, cfg, allow_hosts))
+            elif det is detect_known_ioc:
+                findings.extend(det(name, cfg, campaigns))
             else:
                 findings.extend(det(name, cfg))
         except Exception as e:  # incl. RecursionError and MemoryError

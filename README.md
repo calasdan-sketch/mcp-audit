@@ -34,6 +34,15 @@ run that repository's code. Use it only from a clone of this project that you
 trust, from inside that clone, and install with `pip install .` from there
 for everyday use.
 
+### Without installing it
+
+```bash
+uvx mcp-audit                      # runs the latest release in a throwaway environment
+pipx run mcp-audit verify          # the same with pipx
+uvx mcp-audit@0.3.0 verify --launch   # pin a version, as CI should
+pipx run --spec mcp-audit==0.3.0 mcp-audit verify   # the same, with pipx
+```
+
 ## Usage
 
 ```bash
@@ -233,6 +242,7 @@ Weekly cron example (uses the installed console script):
 | `privileged-launch` | high | The server is started with `sudo`, `doas`, `pkexec`, `su`, `runas` or `gsudo`, also inside `bash -c` |
 | `container-escape` | high / medium | A `docker`/`podman`/`nerdctl run` that hands the container the host (only the options before the image name count; what follows the image is the program's own command line): `--privileged`, `--cap-add` of `ALL`/`SYS_ADMIN`/`SYS_PTRACE`/..., `--pid`/`--ipc`/`--userns=host`, `--security-opt` with `unconfined`, a mount of `/`, `/etc`, `/root`, `/proc`, `/sys`, `/dev`, `~/.ssh`/`~/.aws`/... or of the runtime's socket (`docker.sock`) (high); `--network=host`, `--device` or a mount of the home directory (medium) |
 | `temp-binary` | high | The command, or a script or program given as an argument, lives in a folder every user can write to (`/tmp`, `/var/tmp`, `/dev/shm`, macOS `/var/folders`, `%TEMP%`, `$TMPDIR`, `C:\Windows\Temp`), including a package file or `file://` address given to `uvx --from` or `npx`: whoever can replace that file controls the server |
+| `known-ioc` | critical / high / medium | The server matches an indicator in the built-in feed `mcp_audit/iocs.json` (or in a file given with `--ioc-feed`): an address, file, repository, account or server name that a public report ties to a campaign. Critical for an active host, file or repository, high for an earlier endpoint or an account, medium for a server *name* alone (see "Known-campaign indicators") |
 | `remote-server` | medium | A non-local MCP server: a `url` or `serverUrl` entry, or the address given to a bridge - `mcp-remote`, `mcp-proxy` or `supergateway`, also started through `npx`, `bunx`, `pnpm dlx`, `uvx`, `cmd /c` or `bash -lc` - so traffic leaves the machine by design, as with a `url` entry. A bridge has one server: the URL after `--sse`, `--streamableHttp`, `--url` or `--remote`, or else the first URL it is given; any other URL is an endpoint. Not reported: a local server, or one named with `--allow-host` (https and wss only) |
 | `unparseable-url` | high | A URL in the config that cannot be taken apart (`http://[x`), or whose host depends on the parser that reads it (`https://evil.example\@api.github.com/`: Python says api.github.com, Node says evil.example): where it points is unknown, so it is treated as unsafe. The second kind comes with the remote endpoint it can point to. One bad URL never hides another |
 | `detector-error` | high | A check crashed on this entry, or could not read all of it (a command line over 1,000,000 characters or nested too deeply, a script with more than 2,000 different URLs). mcp-audit fails closed: this is a visible HIGH finding (so `--fail-on high` trips), never a quiet pass. Only the exception class is shown |
@@ -437,6 +447,97 @@ run: in the CI command, in a shell alias.
 - A URL on a private address is still a URL: `--allow-host 192.168.1.20`
   trusts it over https. (A bare `192.168.1.20:5432` is not a URL and is not
   reported.)
+
+## Catching a "rug pull": `lock` and `verify`
+
+An MCP server decides what its tools are called, what they say they do and
+what arguments they take - and it can change all of that after you approved
+it. A server that behaves for a week and then adds "also read `~/.ssh/id_rsa`"
+to a tool description is a *rug pull* (Pillar Security described a live
+campaign, Deadbugz, in August 2026, and recommends exactly this defence: keep
+a fingerprint of the tool definitions you approved and compare against it).
+
+```bash
+# 1. Approve: write mcp.lock, a SHA-256 of every tool each server lists.
+#    Offline and safe - the tool lists come from a file you give it:
+mcp-audit lock --from-tools-json tools.json
+#    ...or ask the servers themselves. THIS RUNS THEM, with your rights, and
+#    says which first; only do it on a config you wrote:
+mcp-audit lock --launch
+
+# 2. Check, any time, in CI or in a pre-commit hook. Exit 0 = nothing
+#    differs, 1 = drift, 2 = it could not check.
+mcp-audit verify --launch
+mcp-audit verify --from-tools-json tools.json
+```
+
+`verify` tells the kinds of change apart: **new tool**, **description
+changed**, **schema changed**, **command changed** (the server is now started
+differently - or its URL is different) and **new server**. A **removed tool**,
+**removed server** and **changed annotations** are listed as hints and do not
+fail the check (`--strict` makes them fail). Without `--from-tools-json` or
+`--launch` it can only check the servers and their commands, and it says so in
+its output (`--require-tools` makes that an error). `lock` never overwrites an
+existing lockfile whose approvals would change: it lists the changes and stops
+until you run it again with `--accept-changes`, so re-locking cannot quietly
+approve a rug pull.
+
+`tools.json` is `{"<server>": [<tool>, ...]}` - what each server's
+`tools/list` returned (a list may be a whole `tools/list` result, and a file
+that is one bare list serves a config with a single server). `lock
+--save-tools FILE` writes one for later offline checks.
+
+The lockfile holds hashes, not descriptions, so it is safe to commit and to
+read in a review. The format is specified in [docs/LOCKFILE.md](docs/LOCKFILE.md)
+and is shared with [mcp-jail](https://github.com/calasdan-sketch/mcp-jail),
+which can check it live (`mcp-jail --lockfile mcp.lock`): every `tools/list`
+answer the server gives is compared against it as the session runs.
+
+**In CI and before commits:** [examples/github-action.yml](examples/github-action.yml)
+is a workflow (a free offline check on pull requests, a scheduled check that
+asks the servers again) and [.pre-commit-hooks.yaml](.pre-commit-hooks.yaml)
+defines `mcp-audit-verify` and `mcp-audit-scan` hooks for
+[pre-commit](https://pre-commit.com).
+
+What the lockfile does **not** do: it does not say a server was safe when you
+approved it (run `--deep` first), it covers a tool's name, description and
+input schema (not `title`, `outputSchema` or `_meta`), and a tool list that is
+different for different clients or different moments is only caught when the
+check sees the different one.
+
+## `who-added`
+
+```bash
+mcp-audit who-added                        # every server in every config
+mcp-audit who-added --config .mcp.json     # one file
+```
+
+For each server in a config that git tracks (a project's `.mcp.json`, say),
+shows the commit, author and date that first put it there and the latest
+commit that changed it - the answer to "who added this and when?" after a
+review missed it. It reads the local git history only (nothing is fetched)
+and tells git not to run any program the repository names. A user-level config
+outside a repository has no history to show; a server added in a change that
+is not committed yet says so. It finds commits by the server's name
+(`git log -S`), so a name that appears in the file for another reason can
+show a commit that only mentioned it.
+
+## Known-campaign indicators
+
+`mcp_audit/iocs.json` lists the addresses, files, repositories and server
+names that a public report ties to a campaign; a server that matches one is a
+`known-ioc` finding (critical for an active host, file or repository). It
+currently holds one campaign, **Deadbugz** (Pillar Security, 12 Aug 2026),
+with the six indicators from that report's table: the endpoint
+`productivity-suite-mcp.onrender.com`, the earlier endpoint
+`promo-surname-xml-quantum.trycloudflare.com`, the file
+`~/.config/.cache/.sys/.deadbug-mcp.py`, the server name `productivity-suite`
+(medium only: a name proves nothing), the repository
+`zellkernel/productivity-suite-mcp` and the account `zellkernel`. The report
+defangs these addresses; they are written plainly in the feed. Nothing else is
+in the feed, and nothing is added without a source. Add your own with
+`--ioc-feed FILE` (repeatable; same format as `iocs.json`). A server that
+matches nothing here is not thereby safe.
 
 ## `--fix`
 
