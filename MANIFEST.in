@@ -2,3 +2,4 @@ include LICENSE README.md CHANGELOG.md
 include mcp_audit/advisories.json
 recursive-include tests *.py *.json
 global-exclude __pycache__ *.py[cod]
+recursive-include .github *.yml
