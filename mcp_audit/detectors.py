@@ -6,11 +6,12 @@ import ipaddress
 import json
 import ntpath
 import re
+import urllib.parse
 import urllib.request
 from importlib import resources
 from typing import NamedTuple
 
-from . import redact, urls
+from . import feeds, osv, redact, urls
 
 #: The advisory feed, shipped as package data next to this module.
 FEED_NAME = "advisories.json"
@@ -1483,20 +1484,45 @@ def _read_feed_text() -> str:
         encoding="utf-8")
 
 
-def load_advisories() -> list[dict]:
-    """The advisory feed. Raises AdvisoryFeedError if it cannot be used."""
+def _advisories_ok(feed) -> bool:
+    return isinstance(feed, list) and all(
+        isinstance(a, dict) and isinstance(a.get("package"), str)
+        and a["package"] for a in feed)
+
+
+MAX_ADVISORY_FEED_BYTES = 8 * 1024 * 1024
+
+
+def load_advisories(extra=()) -> list[dict]:
+    """The advisory feed, plus each `extra` source (a path or an https URL:
+    --advisory-feed). Raises AdvisoryFeedError if one cannot be used."""
     try:
         feed = json.loads(_read_feed_text())
     except Exception as e:  # missing, unreadable, not JSON, not a package
         raise AdvisoryFeedError(
             f"the advisory feed {FEED_NAME} cannot be read "
             f"({type(e).__name__}); this install is broken") from None
-    if not isinstance(feed, list) or not all(
-            isinstance(a, dict) and isinstance(a.get("package"), str)
-            and a["package"] for a in feed):
+    if not _advisories_ok(feed):
         raise AdvisoryFeedError(
             f"the advisory feed {FEED_NAME} is malformed (expected a list of "
             "objects that each name a package)")
+    feed = list(feed)
+    for source in extra:
+        try:
+            raw = feeds.read_source(source, MAX_ADVISORY_FEED_BYTES,
+                                    "--advisory-feed")
+            more = json.loads(raw.decode("utf-8-sig"))
+        except feeds.FeedSourceError as e:
+            raise AdvisoryFeedError(str(e)) from None
+        except (ValueError, RecursionError) as e:
+            raise AdvisoryFeedError(
+                f"--advisory-feed {feeds.shown(source)} cannot be read "
+                f"({type(e).__name__})") from None
+        if not _advisories_ok(more):
+            raise AdvisoryFeedError(
+                f"--advisory-feed {feeds.shown(source)} is malformed "
+                "(expected a list of objects that each name a package)")
+        feed += more
     return feed
 
 
@@ -1544,36 +1570,47 @@ def detect_known_bad(name: str, cfg: dict,
     return findings
 
 
-OSV_URL = "https://api.osv.dev/v1/query"
+OSV_URL = "https://api.osv.dev/v1/querybatch"
 
 
-def detect_osv(name: str, cfg: dict, timeout: float = 10) -> list[dict]:
-    """--online: look up pinned npx/uvx packages in OSV (api.osv.dev).
-
-    Sends only the package name + version. Unpinned packages are skipped
-    (floating-version already flags them; "all versions" results mislead).
-    """
-    findings = []
+def osv_queries(cfg: dict) -> "list[tuple[str, str, str]]":
+    """(ecosystem, name, version) of each exact pin --online may ask about.
+    Unpinned packages are skipped (floating-version already flags them; "all
+    versions" results mislead), and so is anything that may not be a package."""
+    out = []
     for p in _iter_packages(cfg):
-        pkg, ver, eco = p.name, p.release(), p.ecosystem
-        if not ver or not p.sure:  # a range, a tag - or maybe not a package
-            continue
-        body = json.dumps({"package": {"name": pkg, "ecosystem": eco},
-                           "version": ver}).encode()
-        req = urllib.request.Request(
-            OSV_URL, data=body, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                vulns = json.load(resp).get("vulns") or []
-        except (OSError, ValueError) as e:
+        ver = p.release()
+        if ver and p.sure:
+            out.append((p.ecosystem, p.name, ver))
+    return out
+
+
+def detect_osv(name: str, cfg: dict, timeout: float = 10,
+               results: "dict | None" = None,
+               cache: "str | None" = None) -> list[dict]:
+    """--online: look up pinned npx/uvx packages in OSV (api.osv.dev), in one
+    /v1/querybatch request. `results`: answers already fetched for several
+    servers at once (osv.lookup); `cache`: the cache file osv.lookup uses.
+
+    Sends only the ecosystem, package name and version."""
+    findings = []
+    queries = osv_queries(cfg)
+    if not queries:
+        return findings
+    if results is None:
+        results = osv.lookup(queries, timeout, cache)
+    for key in dict.fromkeys(queries):
+        _, pkg, ver = key
+        state, value = results.get(key, ("error", "no answer"))
+        if state != "ok":
             findings.append(_finding("low", "osv-lookup",
-                                     f"OSV lookup for {_echo(pkg)}@{_echo(ver)} failed: {e}"))
+                                     f"OSV lookup for {_echo(pkg)}@{_echo(ver)} failed: {value}"))
             continue
-        for v in vulns:
+        for vid in value:
             findings.append(_finding(
                 "high", "known-vulnerable",
-                f"{_echo(pkg)}@{_echo(ver)} is affected by {v.get('id')} (OSV): "
-                f"{v.get('summary') or 'see https://osv.dev/' + str(v.get('id'))}"))
+                f"{_echo(pkg)}@{_echo(ver)} is affected by {_echo(vid)} (OSV): "
+                f"see https://osv.dev/{urllib.parse.quote(str(vid))}"))
     return findings
 
 

@@ -1,7 +1,7 @@
 """Indicators of compromise: servers, hosts, files and repositories that a
 public report ties to a supply-chain campaign (iocs.json, shipped in the
 wheel). A match is a finding; the feed is data, so adding an indicator is
-editing a file, and `--ioc-feed FILE` adds your own.
+editing a file, and `--ioc-feed FILE_OR_URL` adds your own.
 
 The feed holds only what a report lists. An empty or short feed is normal; a
 missing one is an error (a scanner that lost its feed would call a known
@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import re
 from importlib import resources
+
+from . import feeds
 
 FEED_NAME = "iocs.json"
 TYPES = ("host", "path", "server-name", "github-repo", "github-account",
@@ -73,17 +75,16 @@ def load_feed(extra_paths=()) -> list:
                            "broken") from None
     for path in extra_paths:
         try:
-            with open(path, "rb") as f:
-                raw = f.read(MAX_FEED_BYTES + 1)
-            if len(raw) > MAX_FEED_BYTES:
-                raise IocFeedError(f"--ioc-feed {path} is too large")
+            raw = feeds.read_source(path, MAX_FEED_BYTES, "--ioc-feed")
             campaigns += _check(json.loads(raw.decode("utf-8-sig")),
-                                f"--ioc-feed {path}")
+                                f"--ioc-feed {feeds.shown(path)}")
         except IocFeedError:
             raise
-        except (OSError, ValueError, RecursionError) as e:
-            raise IocFeedError(f"--ioc-feed {path} cannot be read "
-                               f"({type(e).__name__})") from None
+        except feeds.FeedSourceError as e:
+            raise IocFeedError(str(e)) from None
+        except (ValueError, RecursionError) as e:
+            raise IocFeedError(f"--ioc-feed {feeds.shown(path)} cannot be "
+                               f"read ({type(e).__name__})") from None
     return campaigns
 
 

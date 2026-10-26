@@ -7,6 +7,8 @@ Windsurf/Devin, Zed) and flags what can hurt you: prompt-injection in tool
 descriptions, exfiltration endpoints baked into configs, known-vulnerable
 packages, floating version pins, and secrets handed to servers via env.
 
+**Limits:** It reads configuration and tool descriptions and flags known-bad patterns; a clean report is not proof a server is safe, and its feeds go stale between releases.
+
 Thousands of one-line-install MCP servers, ~zero vetting. This is the vetting.
 
 **What it knows, plainly:** the advisory feed built into the package holds
@@ -72,6 +74,13 @@ mcp-audit --allow-host mcp.corp.example --allow-host '*.mirror.corp.example'
 
 # Also look up pinned npx/uvx packages in OSV (network; sends name+version)
 mcp-audit --online
+
+# Probe several servers at once with --deep (at most N; default 1)
+mcp-audit --deep --jobs 4
+
+# A report to paste into a pull request, or to open in a browser
+mcp-audit --format markdown > mcp-audit.md
+mcp-audit --format html > mcp-audit.html
 
 # Print the version and stop
 mcp-audit --version
@@ -505,6 +514,17 @@ input schema (not `title`, `outputSchema` or `_meta`), and a tool list that is
 different for different clients or different moments is only caught when the
 check sees the different one.
 
+### Approval reports for a pull request
+
+`mcp-audit lock --format markdown` (or `html`) prints, on stdout, the table of
+every change to the lockfile that needs approval (what is new, changed or
+removed, server by server), ready to paste as a pull-request comment; the exit
+code is the same as without it (1 when approvals would change and nothing was
+written). `mcp-audit verify --format markdown` does the same for drift.
+Everything that comes from a config or a server is cleaned of credentials and
+escaped, so a tool named `<script>` or `@someone` cannot do anything in the
+comment or the page.
+
 ## `who-added`
 
 ```bash
@@ -536,8 +556,11 @@ with the six indicators from that report's table: the endpoint
 `zellkernel/productivity-suite-mcp` and the account `zellkernel`. The report
 defangs these addresses; they are written plainly in the feed. Nothing else is
 in the feed, and nothing is added without a source. Add your own with
-`--ioc-feed FILE` (repeatable; same format as `iocs.json`). A server that
-matches nothing here is not thereby safe.
+`--ioc-feed FILE_OR_URL` (repeatable; same format as `iocs.json`; a path or an
+https URL, never plain http). A server that matches nothing here is not
+thereby safe. There is no hosted feed service and no `update-feeds` command:
+a feed you fetch is as old as whoever publishes it, and nothing checks its
+age, so a feed that is not kept up to date goes stale without any warning.
 
 ## `--fix`
 
@@ -793,6 +816,35 @@ for each package pinned to an exact version (npm / PyPI). Tags and ranges are
 skipped — `floating-version` already flags them — and so is a digest. A failed lookup is a low finding,
 never a silent pass. (OSV does list real, verified advisories for the `mcp`
 Python SDK — `--online` reports those by version.)
+
+### Your own advisories, newer ones, and OSV
+
+`--advisory-feed FILE_OR_URL` (repeatable, a path or an https URL) adds
+advisories in the format of `advisories.json` to the built-in ones; a feed
+that cannot be read or is malformed ends the run with exit 2. The built-in
+feed is fixed at each release, so it goes stale between releases: for newer
+ones keep your own feed, or use `--online`. `--online` asks OSV about every
+pinned package of every server in one `querybatch` request per 1000 packages
+(only the ecosystem, name and exact version are sent), reads at most 8 MB of
+the answer, and keeps answers for 24 hours in `osv-cache.json` under
+`$MCP_AUDIT_CACHE_DIR`, else `$XDG_CACHE_HOME/mcp-audit` or `~/.cache/mcp-audit`
+(`%LOCALAPPDATA%\mcp-audit` on Windows); `--no-osv-cache` skips it. A failed
+lookup is a finding and is never cached.
+
+## Use it from Python
+
+```python
+from mcp_audit.api import audit
+
+report = audit(".mcp.json", online=False)      # or audit() to discover
+print(report["summary"]["by_severity"])
+```
+
+`mcp_audit.api.audit(config=None, *, online=False, allow_hosts=(),
+ioc_feeds=(), advisory_feeds=(), osv_cache=True)` is the static audit: it
+launches nothing, prints nothing and never exits the process. It returns the
+dict that `--format json` prints, and raises `mcp_audit.api.AuditError` for a
+config or feed that cannot be read (it never returns "clean" for those).
 
 ## Testing
 

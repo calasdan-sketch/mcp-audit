@@ -546,6 +546,12 @@ class _State:
         self.launching = False
         #: a signal that came in meanwhile (see _on_signal)
         self.pending: int | None = None
+        #: True once a signal has ended the pass: a probe that starts after
+        #: that (--jobs runs several at once) stops its own server at once
+        self.stopping = False
+        #: probes that are starting a server (--jobs; see _probe)
+        self.starting = 0
+        self.lock = threading.Lock()
 
 
 _STATE = _State()
@@ -567,12 +573,25 @@ def _on_signal(signum, frame) -> None:
     A signal that comes in while a server is being started is only noted
     (the server cannot be stopped before it is known: Popen has not returned
     yet), and _probe acts on it the moment it is."""
-    if _STATE.launching:
+    if _STATE.launching or _STATE.starting:
         _STATE.pending = signum
         return
-    for proc in list(_STATE.procs):
+    _STATE.stopping = True
+    for proc in _snapshot():
         _kill_tree(proc)
     raise Interrupted(signum)
+
+
+def _snapshot() -> list:
+    """The running servers. Other threads (--jobs) add and remove them while
+    a handler looks, so a copy that fails because the set changed is made
+    again."""
+    for _ in range(100):
+        try:
+            return list(_STATE.procs)
+        except RuntimeError:
+            continue
+    return []
 
 
 @contextlib.contextmanager
@@ -588,6 +607,7 @@ def stop_on_signals():
     purpose). Only the main thread can install a handler: anywhere else this
     does nothing."""
     saved = {}
+    _STATE.stopping = False
     for signum in _available():
         try:
             if signal.getsignal(signum) == signal.SIG_IGN:
@@ -616,6 +636,10 @@ def _probe(cfg: dict, timeout: float, cwd: str) -> dict:
     if program is None:
         return _failure("launch failed (program not found on PATH)")
     argv = [program] + [str(a) for a in cfg.get("args") or []]
+    if _STATE.stopping:
+        raise Interrupted(_STATE.pending or signal.SIGINT)
+    with _STATE.lock:
+        _STATE.starting += 1
     _STATE.launching = True
     try:
         proc = subprocess.Popen(
@@ -627,8 +651,12 @@ def _probe(cfg: dict, timeout: float, cwd: str) -> dict:
     except (OSError, ValueError) as e:
         proc, error = None, e
     finally:
-        _STATE.launching = False
+        with _STATE.lock:
+            _STATE.starting -= 1
+            _STATE.launching = _STATE.starting > 0
     held, _STATE.pending = _STATE.pending, None
+    if held is None and proc is not None and _STATE.stopping:
+        held = signal.SIGINT    # a signal ended the pass meanwhile
     if proc is None:
         if held is not None:
             raise Interrupted(held)
@@ -647,6 +675,57 @@ def _probe(cfg: dict, timeout: float, cwd: str) -> dict:
             _stop(proc, reader)
         finally:
             _STATE.procs.discard(proc)
+
+
+def probe_many(tasks: list, jobs: int = 1, timeout: float = 15) -> list:
+    """probe_server for each (cfg, cwd) of `tasks`, at most `jobs` at a time;
+    the results come back in the order of `tasks`. With one job this is a
+    plain loop. A signal that ends the run (see stop_on_signals) stops every
+    server that is running and raises Interrupted from here, in the main
+    thread, as it does for one probe at a time."""
+    if jobs <= 1 or len(tasks) <= 1:
+        return [probe_server(c, timeout, w) for c, w in tasks]
+    results: list = [None] * len(tasks)
+    todo = list(range(len(tasks)))
+    todo_lock = threading.Lock()
+    interrupted: list = []
+
+    def work() -> None:
+        while not interrupted:
+            with todo_lock:
+                if not todo:
+                    return
+                i = todo.pop(0)
+            try:
+                results[i] = probe_server(tasks[i][0], timeout, tasks[i][1])
+            except Interrupted as e:
+                interrupted.append(e)
+            except BaseException as e:      # the contract: never raises
+                results[i] = _failure(f"probe failed ({type(e).__name__})")
+
+    threads = [threading.Thread(target=work, daemon=True)
+               for _ in range(min(jobs, len(tasks)))]
+    for t in threads:
+        t.start()
+    try:
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(0.1)
+            if interrupted:
+                break
+    except BaseException:       # Interrupted from the handler, or Ctrl-C
+        _STATE.stopping = True
+        for proc in _snapshot():
+            _kill_tree(proc)
+        raise
+    if interrupted:
+        _STATE.stopping = True
+        for proc in _snapshot():
+            _kill_tree(proc)
+        for t in threads:
+            t.join(5)
+        raise interrupted[0]
+    return results
 
 
 def probe_server(cfg, timeout: float = 15, cwd: str | None = None) -> dict:

@@ -42,4 +42,4 @@ packages = ["mcp_audit"]
 # Without this the wheel has no advisory feed and every known-vulnerable
 # package reads as clean.
 [tool.setuptools.package-data]
-mcp_audit = ["advisories.json", "iocs.json"]
+mcp_audit = ["py.typed", "advisories.json", "iocs.json"]

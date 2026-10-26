@@ -21,12 +21,25 @@ from . import deep as deep_mod
 from . import detectors
 from . import discovery
 from . import launch
+from . import osv
 from . import redact
+from . import report
 from . import scoring
 
 
+def json_document(results: list[dict], warnings: list[dict]) -> dict:
+    """The --format json report as a dict (strings sanitized)."""
+    out = {"results": [{k: r[k] for k in
+                        ("name", "client", "path", "project", "findings",
+                         "score", "grade") if k in r} for r in results],
+           "summary": scoring.summarize(results),
+           "warnings": warnings}
+    return redact.sanitize_tree(out)
+
+
 def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
-               online: bool = False, allow_hosts=(), campaigns=None) -> dict:
+               online: bool = False, allow_hosts=(), campaigns=None,
+               osv_results: "dict | None" = None) -> dict:
     """Statically audit one server entry of a discovered group (see
     discovery). Nothing is launched here: that is the --deep step.
     `allow_hosts`: --allow-host, as detectors.host_pattern() writes them."""
@@ -34,7 +47,7 @@ def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
     findings = detectors.audit_server(name, cfg, advisories, allow_hosts,
                                       campaigns)
     if online:
-        findings.extend(detectors.detect_osv(name, cfg))
+        findings.extend(detectors.detect_osv(name, cfg, results=osv_results))
     tools: list[dict] = []
     for f in findings:  # whatever produced it, nothing secret goes out
         f["message"] = redact.clean(f["message"])
@@ -49,10 +62,16 @@ def _audit_one(name: str, cfg: dict, group: dict, advisories: list[dict],
 
 
 def _audit_all(discovered: list[dict], advisories: list[dict],
-               online: bool, allow_hosts=(), campaigns=None) -> list[dict]:
+               online: bool, allow_hosts=(), campaigns=None,
+               osv_cache: "str | None" = None) -> list[dict]:
     detectors.reset_work_budget()
+    osv_results = None
+    if online:      # one request for every pinned package of every server
+        keys = [k for d in discovered for cfg in d["servers"].values()
+                for k in detectors.osv_queries(cfg)]
+        osv_results = osv.lookup(keys, cache=osv_cache) if keys else {}
     return [_audit_one(name, cfg, d, advisories, online, allow_hosts,
-                       campaigns)
+                       campaigns, osv_results)
             for d in discovered for name, cfg in d["servers"].items()]
 
 
@@ -189,7 +208,8 @@ def _held_text(reasons: list[str]) -> str:
 
 
 def _deep_pass(results: list[dict], probe_critical: bool,
-               probe_project: bool, flag: str = "--deep") -> None:
+               probe_project: bool, flag: str = "--deep",
+               jobs: int = 1) -> None:
     """The --deep step: launch the servers that may be launched, read their
     tool descriptions, fold what they say into `results`.
 
@@ -207,7 +227,10 @@ def _deep_pass(results: list[dict], probe_critical: bool,
 
     A signal that ends mcp-audit while a server runs (Ctrl-C, SIGTERM,
     SIGHUP) stops the server first and ends the run: deep_mod.Interrupted
-    comes out of here and main() answers it. There is no report then."""
+    comes out of here and main() answers it. There is no report then.
+
+    `jobs`: how many servers are probed at the same time (--jobs). The
+    notes and findings come out in the same order whatever it is."""
     off = {}    # the entries that switch themselves off, and how
     for r in results:
         how = deep_mod.switched_off(r["config"])
@@ -242,6 +265,16 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                   f"{r['path']}: {_off_text(r, off[id(r)])}")
     sys.stderr.flush()
     with deep_mod.stop_on_signals():
+        probed: dict = {}
+        if jobs > 1:    # all at once (at most `jobs`), then folded in order
+            todo = [r for r in results if id(r) in launching]
+            for r in todo:
+                _note(f"probing '{r['name']}'...")
+            answers = deep_mod.probe_many(
+                [(r["config"],
+                  os.getcwd() if _starts_in_the_project(r) else None)
+                 for r in todo], jobs)
+            probed = {id(r): a for r, a in zip(todo, answers)}
         for r in results:
             if id(r) in off:
                 _add_findings(r, [{
@@ -255,11 +288,14 @@ def _deep_pass(results: list[dict], probe_critical: bool,
                     "message": "--deep did not launch this server: "
                                + _held_text(holds[id(r)])}])
                 continue
-            if id(r) in launching:
-                _note(f"probing '{r['name']}'...")
-            probe = deep_mod.probe_server(
-                r["config"],
-                cwd=os.getcwd() if _starts_in_the_project(r) else None)
+            if id(r) in probed:
+                probe = probed[id(r)]
+            else:
+                if id(r) in launching:
+                    _note(f"probing '{r['name']}'...")
+                probe = deep_mod.probe_server(
+                    r["config"],
+                    cwd=os.getcwd() if _starts_in_the_project(r) else None)
             new: list[dict] = []
             r["probe_complete"] = False
             if probe["ok"]:
@@ -572,6 +608,19 @@ def _host_arg(text: str) -> str:
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
+MAX_JOBS = 16
+
+
+def _jobs_arg(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not 1 <= n <= MAX_JOBS:
+        raise argparse.ArgumentTypeError(f"must be from 1 to {MAX_JOBS}")
+    return n
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mcp-audit",
@@ -641,13 +690,32 @@ def _build_parser() -> argparse.ArgumentParser:
                         "reported. There is no config file: give it on every "
                         "run. Without it only the hosts built in are "
                         "trusted (the README lists them).")
-    p.add_argument("--ioc-feed", action="append", default=[], metavar="FILE",
-                   help="Also match the indicators in FILE (repeatable) - "
-                        "the format of the built-in iocs.json: campaigns "
-                        "with hosts, files, repositories and server names "
-                        "that a public report lists.")
-    p.add_argument("--format", choices=("human", "json", "sarif"),
-                   default="human")
+    p.add_argument("--ioc-feed", action="append", default=[],
+                   metavar="FILE_OR_URL",
+                   help="Also match the indicators in FILE_OR_URL "
+                        "(repeatable; a path or an https URL) - the format "
+                        "of the built-in iocs.json: campaigns with hosts, "
+                        "files, repositories and server names that a public "
+                        "report lists. A feed is as old as its publisher "
+                        "last made it; nothing checks its age.")
+    p.add_argument("--advisory-feed", action="append", default=[],
+                   metavar="FILE_OR_URL",
+                   help="Also use the advisories in FILE_OR_URL (repeatable; "
+                        "a path or an https URL), in the format of the "
+                        "built-in advisories.json. The built-in feed ships "
+                        "with each release and goes stale between releases: "
+                        "for newer ones, keep your own feed or use --online.")
+    p.add_argument("--jobs", type=_jobs_arg, default=1, metavar="N",
+                   help="With --deep: probe up to N servers at the same time "
+                        f"(1 to {MAX_JOBS}, default 1).")
+    p.add_argument("--no-osv-cache", action="store_true",
+                   help="With --online: do not read or write the 24-hour "
+                        "cache of OSV answers.")
+    p.add_argument("--format",
+                   choices=("human", "json", "sarif", "markdown", "html"),
+                   default="human",
+                   help="markdown and html write a report to paste into a "
+                        "pull request or open in a browser.")
     p.add_argument("--fix", action="store_true",
                    help="List the servers launched via a downloader/shell or "
                         "curl|sh (critical suspicious-command / pipe-to-shell)"
@@ -887,8 +955,12 @@ def _main(argv: list[str] | None) -> int:
         parser.error("--probe-critical only works together with --deep")
     if args.probe_project and not args.deep:
         parser.error("--probe-project only works together with --deep")
+    if args.jobs > 1 and not args.deep:
+        parser.error("--jobs only works together with --deep")
+    if args.no_osv_cache and not args.online:
+        parser.error("--no-osv-cache only works together with --online")
     try:
-        advisories = detectors.load_advisories()
+        advisories = detectors.load_advisories(args.advisory_feed)
     except detectors.AdvisoryFeedError as e:
         # A scanner without its feed would call vulnerable packages clean.
         _note(f"error: {e}; refusing to report results without it")
@@ -917,8 +989,9 @@ def _main(argv: list[str] | None) -> int:
         except iocs.IocFeedError as e:
             _note(f"error: {e}")
             return 2
+    cache = None if args.no_osv_cache else osv.cache_path()
     results = _audit_all(discovered, advisories, args.online, allow_hosts,
-                         campaigns)
+                         campaigns, cache)
 
     fix_failed = False
     if args.fix:
@@ -928,10 +1001,11 @@ def _main(argv: list[str] | None) -> int:
         # re-audit so the report reflects reality
         discovered, warnings = discovery.discover(args.config)
         results = _audit_all(discovered, advisories, args.online, allow_hosts,
-                             campaigns)
+                             campaigns, cache)
 
     if args.deep:  # after --fix: once, and never a server --fix just removed
-        _deep_pass(results, args.probe_critical, args.probe_project)
+        _deep_pass(results, args.probe_critical, args.probe_project,
+                   jobs=args.jobs)
 
     # Names, paths and project directories come from the config files: what
     # is printed has its control and bidi characters spelled out (sanitize),
@@ -940,14 +1014,12 @@ def _main(argv: list[str] | None) -> int:
         print(json.dumps(redact.sanitize_tree(
             scoring.render_sarif(results, __version__)), indent=2))
     elif args.format == "json":
-        out = {"results": [{k: r[k] for k in
-                            ("name", "client", "path", "project", "findings",
-                             "score", "grade") if k in r} for r in results],
-               "summary": scoring.summarize(results),
-               "warnings": warnings}
-        print(json.dumps(redact.sanitize_tree(out), indent=2))
+        print(json.dumps(json_document(results, warnings), indent=2))
+    elif args.format in ("markdown", "html"):
+        print(report.findings_report(results, warnings, args.format,
+                                     __version__), end="")
     if args.format != "human":
-        if args.format == "sarif":
+        if args.format in ("sarif", "markdown", "html"):
             for w in warnings:  # JSON carries these inline; SARIF can't
                 _note(f"warning: skipped {w['path']} <{w['client']}>: "
                       f"{w['reason']}")

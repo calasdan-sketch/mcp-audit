@@ -142,7 +142,7 @@ class TestWhatIsSaid(unittest.TestCase):
         sent = []
 
         def urlopen(request, timeout=None):
-            sent.append(json.loads(request.data))
+            sent.extend(json.loads(request.data)["queries"])
             raise OSError("offline")
 
         with unittest.mock.patch.object(detectors.urllib.request, "urlopen",

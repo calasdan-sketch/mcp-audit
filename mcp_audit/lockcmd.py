@@ -26,6 +26,7 @@ from . import detectors
 from . import discovery
 from . import lockfile as lf
 from . import redact
+from . import report
 
 EXIT_OK, EXIT_DRIFT, EXIT_ERROR = 0, 1, 2
 DEFAULT_LOCK = "mcp.lock"
@@ -304,13 +305,38 @@ def _why_unread(s: Srv) -> str:
 # -- lock ---------------------------------------------------------------------
 
 
+def _umask() -> int:
+    """The process umask (read by setting it and putting it back)."""
+    if not hasattr(os, "umask"):
+        return 0
+    old = os.umask(0o022)
+    os.umask(old)
+    return old
+
+
 def _atomic_write(path: str, text: str) -> None:
+    """Write `path` so that it holds all of `text` or what it held before,
+    even if the machine stops half-way: the data is flushed to disk before
+    the rename. The file gets the mode any new file gets (0644 less the
+    umask), not the 0600 of a temporary file: the lockfile is meant to be
+    committed and read by the team and CI."""
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".mcp.lock-", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o644 & ~_umask())
         os.replace(tmp, path)
+        if os.name == "posix":      # make the rename itself durable
+            with contextlib.suppress(OSError):
+                dfd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -382,6 +408,12 @@ def cmd_lock(argv: "list[str]") -> int:
                    help="overwrite an existing lockfile whose approvals "
                         "differ (the differences are listed first). Without "
                         "it, an existing lockfile is never changed.")
+    p.add_argument("--format", choices=("text", "markdown", "html"),
+                   default="text",
+                   help="markdown or html: print the approval report (every "
+                        "change to the lockfile, ready to paste into a pull "
+                        "request) on stdout instead of the plain list on "
+                        "stderr. The exit codes do not change.")
     p.add_argument("--save-tools", metavar="FILE",
                    help="also write the tool lists that were read to FILE "
                         "(a --from-tools-json file for later offline checks)")
@@ -441,13 +473,26 @@ def _lock(args, parser) -> int:
         if changes and not args.accept_changes:
             for n in notes:
                 _say(n)
-            _say(f"{out_path} already exists and these approvals would "
-                 "change:")
-            for key, d in changes:
-                sys.stderr.write(_line(key, d) + "\n")
+            if args.format != "text":
+                print(report.changes_report(
+                    changes, args.format, out_path,
+                    "mcp-audit: lockfile changes need approval",
+                    "Nothing was written. These approvals would change."),
+                    end="")
+            else:
+                _say(f"{out_path} already exists and these approvals would "
+                     "change:")
+                for key, d in changes:
+                    sys.stderr.write(_line(key, d) + "\n")
             _say("nothing was written. If you have read the changes and "
                  "approve them, run again with --accept-changes.")
             return EXIT_DRIFT
+        if args.format != "text":
+            print(report.changes_report(
+                changes, args.format, out_path,
+                "mcp-audit: lockfile changes approved",
+                "Written with --accept-changes." if changes
+                else "No approval changed."), end="")
     for n in notes:
         _say(n)
     try:
@@ -465,9 +510,13 @@ def _lock(args, parser) -> int:
             raise _Stop(f"cannot write {args.save_tools}: "
                         f"{e.strerror or type(e).__name__}") from None
     n_tools = sum(len(e["tools"]) for e in lock["servers"].values())
-    print(f"wrote {out_path}: {len(lock['servers'])} server(s), "
-          f"{n_tools} tool(s)"
-          + (f"; {unread} server(s) not locked" if unread else ""))
+    done = (f"wrote {out_path}: {len(lock['servers'])} server(s), "
+            f"{n_tools} tool(s)"
+            + (f"; {unread} server(s) not locked" if unread else ""))
+    if args.format != "text":
+        _say(done)      # stdout carries the report
+    else:
+        print(done)
     return EXIT_OK
 
 
@@ -482,7 +531,10 @@ def cmd_verify(argv: "list[str]") -> int:
                     "changed description or schema, a changed command, a "
                     "new server), 2 when it could not check.")
     _common(p, True)
-    p.add_argument("--format", choices=("human", "json"), default="human")
+    p.add_argument("--format", choices=("human", "json", "markdown", "html"),
+                   default="human",
+                   help="markdown or html: the drift as text for a pull-"
+                        "request comment or a page (on stdout)")
     p.add_argument("--require-tools", action="store_true",
                    help="exit 2 if tool definitions were not checked (no "
                         "--from-tools-json and no --launch)")
@@ -566,6 +618,20 @@ def _verify(args, parser) -> int:
             "notes": [redact.clean(n) for n in notes],
         }
         print(json.dumps(doc, indent=2, sort_keys=True))
+        return code
+    if args.format in ("markdown", "html"):
+        for n in notes:
+            _say(n)
+        for key in res["unverified"]:
+            _say(f"'{_show(key)}' could not be checked: " + _why_unread(
+                next(s for s in servers if s.key == key)))
+        verdict = ("Drift: the servers differ from the lockfile." if hard
+                   else "Could not check every server." if code
+                   else "The servers match the lockfile.")
+        print(report.changes_report(
+            hard, args.format, args.lockfile,
+            "mcp-audit verify: " + ("drift" if hard else "result"),
+            verdict, hints), end="")
         return code
     for n in notes:
         _say(n)

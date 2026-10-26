@@ -235,8 +235,9 @@ class TestAdvisoriesAndOsvSeeExactVersions(unittest.TestCase):
         with unittest.mock.patch.object(
                 detectors.urllib.request, "urlopen",
                 side_effect=lambda req, timeout=None: (
-                    sent.append(json.loads(req.data.decode()))
-                    or Ctx(b'{"vulns": []}'))):
+                    sent.extend(json.loads(req.data.decode())["queries"])
+                    or Ctx(json.dumps({"results": [
+                        {} for _ in sent]}).encode()))):
             detectors.detect_osv("x", cfg)
         return sent
 

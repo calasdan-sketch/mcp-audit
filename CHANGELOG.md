@@ -2,12 +2,15 @@
 
 ## 0.3.0
 
+- `--online` asks OSV once per 1000 packages (`/v1/querybatch`) instead of once per package, reads at most 8 MB of the answer and caches answers for 24 hours (`MCP_AUDIT_CACHE_DIR`, `--no-osv-cache`). A failed lookup is still a finding and is never cached.
+- `lock` and `verify` write/flush the lockfile durably (fsync before the rename) and give it mode 0644 less the umask instead of the temporary file's 0600.
+- `--deep --jobs N` probes up to N servers at once (1 to 16); notes and findings keep their order, and a signal still stops every server.
+- `--ioc-feed` takes a path or an https URL, and the new `--advisory-feed` adds advisories the same way. There is no hosted service or update command; a fetched feed is as old as its publisher.
+- `mcp_audit.api.audit(config)` returns the `--format json` report as a dict, launches nothing and raises `AuditError` instead of reporting a config it could not read as clean.
+- `--format markdown|html` on the audit, `lock` and `verify`: an approval report with the lockfile changes, as a pull-request comment or a self-contained page.
+- CI installs the built wheel on Windows (`Scripts\mcp-audit`) and macOS and runs it.
 - `.gitattributes` keeps docs/LOCKFILE.md and the shared vectors on LF in every checkout; the spec-hash test hashes the LF text, so a CRLF checkout (Windows) still matches the hash the vectors name.
-
 - Configs, lockfiles and probe replies nested deeper than 1000 levels are refused by a depth limit of our own instead of relying on RecursionError (Python 3.14 does not raise it with a large stack).
-
-- Tests only: the wheel-build test skips (instead of failing) when the local setuptools is too old for the SPDX `license` string, as the trivial probe project now uses it too.
-
 - **Catch a "rug pull" (a server that changes its tool descriptions after you
   approved it).** `mcp-audit lock` writes `mcp.lock`, a SHA-256 of every tool
   each configured server lists (name, description and input schema; the file
@@ -32,6 +35,7 @@
   mcp-audit without installing it (`uvx`, `pipx run`).
 - `--deep`'s probe keeps the tools exactly as the server sent them, which
   `lock --launch` uses.
+- Tests only: the wheel-build test skips (instead of failing) when the local setuptools is too old for the SPDX `license` string, as the trivial probe project now uses it too.
 
 ## 0.2.5
 

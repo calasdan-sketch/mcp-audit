@@ -896,16 +896,17 @@ class TestOnline(unittest.TestCase):
 
         def fake_urlopen(req, timeout=None):
             seen["body"] = json.loads(req.data)
-            return Resp(json.dumps({"vulns": [
-                {"id": "GHSA-xxxx", "summary": "bad thing"}]}).encode())
+            return Resp(json.dumps({"results": [{"vulns": [
+                {"id": "GHSA-xxxx", "modified": "2025-01-01T00:00:00Z"}]}]}
+            ).encode())
 
         from mcp_audit import detectors
         cfg = {"command": "npx", "args": ["-y", "some-pkg@1.0.0"]}
         with unittest.mock.patch.object(detectors.urllib.request,
                                         "urlopen", fake_urlopen):
             f = detectors.detect_osv("x", cfg)
-        self.assertEqual(seen["body"], {"package": {
-            "name": "some-pkg", "ecosystem": "npm"}, "version": "1.0.0"})
+        self.assertEqual(seen["body"], {"queries": [{"package": {
+            "name": "some-pkg", "ecosystem": "npm"}, "version": "1.0.0"}]})
         self.assertEqual(len(f), 1)
         self.assertIn("GHSA-xxxx", f[0]["message"])
 
