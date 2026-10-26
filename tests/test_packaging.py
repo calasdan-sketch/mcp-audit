@@ -131,7 +131,7 @@ class TestBuiltWheel(unittest.TestCase):
         with open(os.path.join(toy, "pyproject.toml"), "w") as f:
             f.write('[build-system]\nrequires = ["setuptools>=61"]\n'
                     'build-backend = "setuptools.build_meta"\n'
-                    '[project]\nname = "toy"\nversion = "1"\n')
+                    '[project]\nname = "toy"\nversion = "1"\nlicense = "MIT"\n')   # as mcp-audit does
         with open(os.path.join(toy, "toypkg", "__init__.py"), "w") as f:
             f.write("")
         p = _pip_wheel(toy, os.path.join(cls.tmp, "toy-out"), env)

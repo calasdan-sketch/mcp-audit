@@ -2,6 +2,8 @@
 
 ## 0.3.0
 
+- Tests only: the wheel-build test skips (instead of failing) when the local setuptools is too old for the SPDX `license` string, as the trivial probe project now uses it too.
+
 - **Catch a "rug pull" (a server that changes its tool descriptions after you
   approved it).** `mcp-audit lock` writes `mcp.lock`, a SHA-256 of every tool
   each configured server lists (name, description and input schema; the file
