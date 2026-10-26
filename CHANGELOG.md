@@ -2,6 +2,8 @@
 
 ## 0.3.0
 
+- `.gitattributes` keeps docs/LOCKFILE.md and the shared vectors on LF in every checkout; the spec-hash test hashes the LF text, so a CRLF checkout (Windows) still matches the hash the vectors name.
+
 - Configs, lockfiles and probe replies nested deeper than 1000 levels are refused by a depth limit of our own instead of relying on RecursionError (Python 3.14 does not raise it with a large stack).
 
 - Tests only: the wheel-build test skips (instead of failing) when the local setuptools is too old for the SPDX `license` string, as the trivial probe project now uses it too.

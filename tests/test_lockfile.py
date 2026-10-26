@@ -73,7 +73,9 @@ class TestSharedVectors(unittest.TestCase):
 
     def test_the_spec_is_the_same_file_in_both_repositories(self):
         with open(os.path.join(ROOT, "docs", "LOCKFILE.md"), "rb") as f:
-            self.assertEqual(hashlib.sha256(f.read()).hexdigest(),
+            # the hash is over the LF text; a Windows checkout may turn it into CRLF
+            data = f.read().replace(b"\r\n", b"\n")
+            self.assertEqual(hashlib.sha256(data).hexdigest(),
                              vectors()["spec_sha256"])
 
 
