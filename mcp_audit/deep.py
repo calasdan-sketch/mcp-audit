@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import json
+from . import _depth as depth_mod
 import os
 import queue
 import shutil
@@ -269,7 +270,7 @@ def _response(line: bytes):
     if not line.lstrip().startswith(b"{"):
         return None
     try:
-        msg = json.loads(line.decode("utf-8", "replace"))
+        msg = depth_mod.loads(line.decode("utf-8", "replace"))
     except (ValueError, RecursionError):
         return None
     if isinstance(msg, dict) and "id" in msg and (

@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+from . import _depth as depth_mod
 import math
 import re
 import unicodedata
@@ -297,7 +298,7 @@ def parse_lock(text) -> dict:
         except UnicodeDecodeError:
             raise LockError("the lockfile is not UTF-8") from None
     try:
-        lock = json.loads(text, object_pairs_hook=_no_duplicates)
+        lock = depth_mod.loads(text, object_pairs_hook=_no_duplicates)
     except LockError:
         raise
     except (ValueError, RecursionError):

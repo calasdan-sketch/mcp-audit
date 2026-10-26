@@ -5,6 +5,7 @@ import codecs
 import contextlib
 import errno
 import json
+from . import _depth as depth_mod
 import os
 import re
 import shutil
@@ -362,7 +363,7 @@ def _load_for_rewrite(path: str) -> "tuple[object, bytes, dict]":
     try:
         text = raw[len(codecs.BOM_UTF8):].decode("utf-8") if bom \
             else raw.decode("utf-8")
-        data = json.loads(text)
+        data = depth_mod.loads(text)
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _Skip("it is not plain UTF-8 JSON (comments, trailing commas "
                     "or another encoding?); remove the server by hand")
