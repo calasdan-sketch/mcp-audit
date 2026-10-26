@@ -1,0 +1,30 @@
+# Hooks for https://pre-commit.com. In your repository's .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/calasdan-sketch/mcp-audit
+#       rev: v0.3.0
+#       hooks:
+#         - id: mcp-audit-verify
+#
+# mcp-audit-verify needs mcp.lock and mcp-tools.json in the repository root.
+# Make them once with:
+#   mcp-audit lock --config .mcp.json --launch --save-tools mcp-tools.json
+# (--launch RUNS the servers in .mcp.json: do it on a config you wrote), and
+# commit both. The hook then fails a commit that changes .mcp.json, the lock
+# or the tool snapshot so that they no longer agree. It does not start the
+# servers, so it cannot see a server change its tools by itself; for that run
+# `mcp-audit verify --launch` on a schedule (see examples/github-action.yml).
+- id: mcp-audit-verify
+  name: mcp-audit verify (MCP tool lockfile)
+  description: Fail if .mcp.json, mcp.lock and mcp-tools.json disagree.
+  entry: mcp-audit verify --config .mcp.json --lockfile mcp.lock --from-tools-json mcp-tools.json --require-tools
+  language: python
+  pass_filenames: false
+  files: '(^|/)(\.mcp\.json|mcp\.lock|mcp-tools\.json)$'
+- id: mcp-audit-scan
+  name: mcp-audit (static audit of .mcp.json)
+  description: Audit the MCP servers in .mcp.json; fail on high findings.
+  entry: mcp-audit --config .mcp.json --fail-on high
+  language: python
+  pass_filenames: false
+  files: '(^|/)\.mcp\.json$'

@@ -709,7 +709,9 @@ class TestTimeIsLinear(unittest.TestCase):
         start = time.monotonic()
         found = findings(text)
         self.assertLess(time.monotonic() - start, 5)
-        self.assertEqual(top(found), "medium")
+        # high: what is past the limit was not read, and --fail-on high must
+        # not wave it through (an instruction can sit behind the padding)
+        self.assertEqual(top(found), "high")
         self.assertIn("only the first", found[0]["message"])
 
     def test_a_thousand_ordinary_descriptions_are_quick(self):

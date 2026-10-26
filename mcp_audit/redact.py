@@ -25,6 +25,7 @@ report.
 
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 
@@ -49,9 +50,55 @@ _TOKEN_SHAPES_RE = re.compile("|".join((
     r"\bxox[abeprs]-[A-Za-z0-9\-]{10,}",
     r"\bAKIA[0-9A-Z]{16}\b",
     r"\bAIza[0-9A-Za-z_\-]{30,}",
-    r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]*",
+    # (JSON Web Tokens are found by _redact_jwts: as one regex they cost
+    # time quadratic in the length of a run of "eyJ...-eyJ...-" blocks.)
 )))
+#: A JSON Web Token, as a regex. Reference for _redact_jwts (the tests hold the
+#: two to the same answers); not used on real input, because a text of
+#: "eyJaaaaaaaaa-" repeated makes every start scan the rest of the run.
+_JWT_REFERENCE_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]*")
+_JWT_START_RE = re.compile(r"\beyJ")
+_JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]+")
 _BEARER_RE = re.compile(r"(?i)\b(bearer|basic)(\s+)[A-Za-z0-9._~+/=\-]{8,}")
+
+
+def _redact_jwts(text: str) -> str:
+    """`text` with each JSON Web Token (eyJ<8+>.<8+>.<rest>, see
+    _JWT_REFERENCE_RE) replaced. Linear in the length of the text: the runs of
+    token characters are found once, and each candidate start looks only at
+    the run it is in and the next two."""
+    if "eyJ" not in text or "." not in text:
+        return text
+    runs = [(m.start(), m.end()) for m in _JWT_RUN_RE.finditer(text)]
+    starts = [r[0] for r in runs]
+    out: list[str] = []
+    pos = 0
+    for m in _JWT_START_RE.finditer(text):
+        i = m.start()
+        if i < pos:
+            continue
+        j = bisect.bisect_right(starts, i + 3) - 1
+        if j < 0:
+            continue
+        end1 = runs[j][1]
+        if end1 - (i + 3) < 8 or text[end1:end1 + 1] != ".":
+            continue
+        if j + 1 >= len(runs) or starts[j + 1] != end1 + 1:
+            continue
+        end2 = runs[j + 1][1]
+        if end2 - (end1 + 1) < 8 or text[end2:end2 + 1] != ".":
+            continue
+        end3 = end2 + 1
+        if j + 2 < len(runs) and starts[j + 2] == end3:
+            end3 = runs[j + 2][1]
+        out.append(text[pos:i])
+        out.append(REDACTED)
+        pos = end3
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def safe_url(url: str) -> str:
@@ -81,6 +128,7 @@ def redact_text(text: str) -> str:
     text = _URL_IN_TEXT_RE.sub(_shorten_url, str(text))
     text = _BEARER_RE.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     text = _TOKEN_SHAPES_RE.sub(REDACTED, text)
+    text = _redact_jwts(text)
     return _mask_pairs(text)
 
 

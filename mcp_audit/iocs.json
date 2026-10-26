@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "updated": "2026-10-24",
+  "note": "Indicators of compromise for known MCP supply-chain campaigns. Only indicators that a public report lists are here. To add your own, write a file in this format and pass it with --ioc-feed.",
+  "campaigns": [
+    {
+      "id": "deadbugz",
+      "title": "Deadbugz",
+      "published": "2026-08-12",
+      "source": "https://www.pillar.security/blog/deadbugz-currently-active-mcp-supply-chain-campaign",
+      "source_label": "Pillar Security, 12 Aug 2026",
+      "checked": "2026-10-24: the report's indicator table was read from the page; the page defangs the addresses (hxxps, [.]) and they are written plainly here. The report also lists a Bitcoin address as a campaign marker; it is left out because it cannot appear in a server config.",
+      "indicators": [
+        {"type": "host", "value": "productivity-suite-mcp.onrender.com", "status": "active",
+         "note": "remote MCP endpoint (path /mcp)"},
+        {"type": "host", "value": "promo-surname-xml-quantum.trycloudflare.com", "status": "historical",
+         "note": "earlier endpoint; the report does not treat it as active"},
+        {"type": "path", "value": ".config/.cache/.sys/.deadbug-mcp.py", "status": "active",
+         "note": "local delivery artifact (found in four reviewed pull-request configurations)"},
+        {"type": "server-name", "value": "productivity-suite", "status": "active",
+         "note": "server name the campaign uses"},
+        {"type": "github-repo", "value": "zellkernel/productivity-suite-mcp", "status": "active",
+         "note": "public source of the server"},
+        {"type": "github-account", "value": "zellkernel", "status": "active",
+         "note": "account that submitted the 23 reviewed pull requests"}
+      ]
+    }
+  ]
+}

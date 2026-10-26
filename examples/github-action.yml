@@ -1,0 +1,48 @@
+# Copy to .github/workflows/mcp-lock.yml in your repository.
+#
+# Set up once, on your own machine:
+#   mcp-audit lock --config .mcp.json --launch --save-tools mcp-tools.json
+# (--launch RUNS the servers in .mcp.json; do it on a config you wrote.)
+# Commit .mcp.json, mcp.lock and mcp-tools.json.
+name: mcp-lock
+on:
+  pull_request:
+    paths: [".mcp.json", "mcp.lock", "mcp-tools.json"]
+  schedule:
+    - cron: "17 6 * * 1"        # Mondays: ask the servers again
+permissions: {contents: read}
+jobs:
+  files-agree:
+    # Free and safe: nothing is started. Fails a pull request that changes
+    # the servers, the lock or the saved tool lists so they no longer agree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Verify the lockfile against the saved tool lists
+        run: |
+          pipx run --spec mcp-audit==0.3.0 mcp-audit verify \
+            --config .mcp.json \
+            --lockfile mcp.lock \
+            --from-tools-json mcp-tools.json \
+            --require-tools
+  servers-unchanged:
+    # Asks the servers what they list now and compares it with the lock: this
+    # is the check that catches a server that changed after you approved it.
+    # It STARTS the servers in .mcp.json on the runner, with the runner's
+    # rights and secrets: keep it for a repository whose .mcp.json only
+    # maintainers can change, and do not run it on pull requests from forks.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Start the servers and compare their tools with the lock
+        run: |
+          pipx run --spec mcp-audit==0.3.0 mcp-audit verify \
+            --config .mcp.json \
+            --lockfile mcp.lock \
+            --launch \
+            --probe-project

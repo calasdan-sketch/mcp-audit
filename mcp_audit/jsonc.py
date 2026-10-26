@@ -10,6 +10,7 @@ scan is string-aware: a `//` or `/*` inside a string - a URL, a Windows path
 from __future__ import annotations
 
 import json
+from . import _depth as depth_mod
 import re
 
 # One token at a time, from a position. The alternatives are exclusive and
@@ -76,6 +77,7 @@ def loads(text: str):
     """Parse JSON or JSONC. Raises ValueError for malformed text,
     RecursionError for text nested too deeply and MemoryError when it is
     too large."""
+    depth_mod.check(text)       # our own limit, the same on every Python version
     try:
         return json.loads(text)  # plain JSON (nearly always): nothing to strip
     except ValueError:

@@ -28,7 +28,8 @@ How a text is read:
    entities, backslash escapes) is decoded, two levels deep, and read the
    same way. Every encoded run is decoded however many there are, so that a
    payload cannot hide behind padding; at most MAX_TEXT characters of the
-   result are read, and what is left over is reported, not passed.
+   result are read, and what is left over is reported, not passed (a text
+   longer than MAX_TEXT is a high finding by itself: the rest was not read).
 3. Each reading is searched for signals: an override of the agent's
    instructions, concealment from the user, a sensitive file the agent is told
    to read (or whose contents a parameter is to hold), a way of passing data
@@ -971,12 +972,16 @@ def _severity(s: set):
     if s & {"run_remote", "prompt_leak"} and (
             carry or s & _STAGED or {"run_remote", "prompt_leak"} <= s):
         return "critical"
-    if s & {"conceal", "hidden", "url_data", "read_sensitive", "prompt_leak"}:
+    # "truncated": a text longer than MAX_TEXT was only read in part, so an
+    # instruction after the padding was not read at all. High, so that
+    # --fail-on high does not pass what it could not look at.
+    if s & {"conceal", "hidden", "url_data", "read_sensitive", "prompt_leak",
+            "truncated"}:
         return "high"
     if "read_weak" in s and carry:
         return "high"
     if s & {"send_data", "run_remote", "contents", "tag", "hijack", "comment",
-            "encoded", "truncated"}:
+            "encoded"}:
         return "medium"
     if "blob" in s:
         return "low"

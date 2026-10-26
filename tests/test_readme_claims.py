@@ -50,7 +50,7 @@ class TestTheVersionFlag(unittest.TestCase):
             cli.main(["--version"])
         self.assertEqual(stop.exception.code, 0)
         self.assertEqual(out.getvalue().strip(), "mcp-audit " + __version__)
-        self.assertIn("python3 -m mcp_audit --version", readme())
+        self.assertIn("mcp-audit --version", readme())
 
 
 class TestWhatExitStatusZeroMeans(unittest.TestCase):
