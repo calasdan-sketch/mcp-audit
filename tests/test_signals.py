@@ -160,7 +160,19 @@ class TestARealRun(unittest.TestCase):
 
 
 class TestTheHandlers(unittest.TestCase):
+    def _reset(self):
+        # state a handler test leaves behind must not reach the next one
+        deep_mod._STATE.stopping = False
+        deep_mod._STATE.starting = 0
+        deep_mod._STATE.launching = False
+        deep_mod._STATE.pending = None
+        deep_mod._STATE.procs.clear()
+
+    def setUp(self):
+        self._reset()
+
     def tearDown(self):
+        self._reset()
         deep_mod._STATE.launching = False
         deep_mod._STATE.pending = None
         deep_mod._STATE.procs.clear()

@@ -209,7 +209,8 @@ class TestWorkspaceFiles(unittest.TestCase):
         self.assertEqual(set(by["devin-project"]), {"dv-proj", "dv-local"})
 
     def test_xdg_config_home_is_honoured_without_the_override(self):
-        fake = os.path.join(os.sep, "xdg")
+        # absolute on every OS (a bare "\\xdg" has no drive on Windows)
+        fake = os.path.join(os.path.abspath(os.sep), "xdg")
         with unittest.mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": fake}):
             os.environ.pop(discovery.HOME_ENV, None)
             self.assertEqual(discovery.roots()["config"], fake)
