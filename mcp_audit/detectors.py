@@ -1556,6 +1556,150 @@ def detect_secret_env(name: str, cfg: dict) -> list[dict]:
     return findings
 
 
+#: A header name that carries a credential even though its name has no
+#: "token" or "key" word.
+_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization",
+                                 "cookie", "x-api-key", "api-key"})
+#: A header value that only points at a secret kept elsewhere: `${VAR}`,
+#: `$VAR`, `%VAR%`, `{env:VAR}`, `${input:id}`, `$(cmd)`.
+_REFERENCE_RE = re.compile(r"\$[{(A-Za-z_]|%[A-Za-z_][^%]*%|\{(?:env|input):")
+
+
+def detect_secret_header(name: str, cfg: dict) -> list[dict]:
+    """A credential written into `headers` as a literal value (a remote
+    server's `Authorization: Bearer sk-...`) sits in the config file in
+    plain text. A value that is a reference to an environment variable or an
+    input prompt is the safe form and is not reported. Only the header names
+    are printed, never a value."""
+    headers = cfg.get("headers")
+    if not isinstance(headers, dict):
+        return []
+    literal = []
+    for key, value in headers.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if not (key.lower() in _CREDENTIAL_HEADERS
+                or redact.is_secret_name(key)):
+            continue
+        # `Bearer ${TOKEN}` is a reference; a bare scheme word is no secret
+        body = re.sub(r"(?i)^\s*(bearer|basic|token)\s+", "", value).strip()
+        if not body or _REFERENCE_RE.search(value):
+            continue
+        literal.append(key)
+    if not literal:
+        return []
+    shown = ", ".join(sorted(literal)[:5])
+    more = f" (+{len(literal) - 5} more)" if len(literal) > 5 else ""
+    return [_finding(
+        "medium", "secret-header",
+        f"credential written into the config as a literal header value: "
+        f"{shown}{more} \u2014 anyone who can read this file has it; use an "
+        f"environment-variable reference instead")]
+
+
+# -- Containers ---------------------------------------------------------------
+
+_CONTAINER_RUNTIMES = frozenset({"docker", "podman", "nerdctl"})
+#: `docker run` options that take a value in the next argument (without "="),
+#: so that value is not mistaken for the image name.
+_RUN_VALUE_OPTS = frozenset({
+    "-e", "--env", "--env-file", "-v", "--volume", "--mount", "-p",
+    "--publish", "--name", "-w", "--workdir", "-u", "--user", "--network",
+    "--net", "--cap-add", "--cap-drop", "--security-opt", "--pid", "--ipc",
+    "--userns", "--uts", "--entrypoint", "-l", "--label", "--add-host",
+    "--platform", "-m", "--memory", "--cpus", "--device", "--restart",
+    "--hostname", "-h", "--dns", "--tmpfs", "--group-add", "--pull",
+    "--log-driver", "--shm-size", "--ulimit", "--runtime", "--gpus",
+    "--cgroupns"})
+_DANGEROUS_CAPS = frozenset({"ALL", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE",
+                             "SYS_RAWIO", "DAC_READ_SEARCH"})
+_ENGINE_SOCKETS = ("docker.sock", "podman.sock", "containerd.sock",
+                   "docker_engine")
+
+
+def _mount_source(spec: str) -> str:
+    """The host side of `-v SRC:DST[:opts]` or `--mount ...,src=SRC,...`."""
+    if "=" in spec and "," in spec or spec.startswith(("type=", "src=",
+                                                      "source=")):
+        for part in spec.split(","):
+            k, _, v = part.partition("=")
+            if k.strip() in ("src", "source"):
+                return v.strip()
+        return ""
+    if re.match(r"^[A-Za-z]:[\\/]", spec):  # C:\dir:/dst
+        return spec[:3] + spec[3:].split(":", 1)[0]
+    return spec.split(":", 1)[0]
+
+
+def _run_options(args: "list[str]") -> "list[tuple[str, str | None]]":
+    """The `docker run` options before the image: (option, value) pairs."""
+    if "run" not in args[:4]:
+        return []
+    rest = args[args.index("run") + 1:]
+    out: "list[tuple[str, str | None]]" = []
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--" or not a.startswith("-") or a == "-":
+            break  # the image (or the end of the options)
+        if a.startswith("--") and "=" in a:
+            opt, _, val = a.partition("=")
+            out.append((opt, val))
+        elif a in _RUN_VALUE_OPTS and i + 1 < len(rest):
+            out.append((a, rest[i + 1]))
+            i += 1
+        elif (len(a) > 2 and a[1] != "-" and a[:2] in ("-v", "-e", "-p")
+              and a[:2] in _RUN_VALUE_OPTS):
+            out.append((a[:2], a[2:]))  # -v/:/host
+        else:
+            out.append((a, None))
+        i += 1
+    return out
+
+
+def detect_container_escape(name: str, cfg: dict) -> list[dict]:
+    """`docker run` options that take the container's isolation away: the
+    server then has the machine, not a sandbox. Only the options before the
+    image are read (what follows is the server's own command line), and only
+    settings that remove isolation are reported, not ordinary mounts of a
+    project folder or a published port."""
+    high: "list[str]" = []
+    medium: "list[str]" = []
+    for prog, args in _launched(cfg):
+        if prog not in _CONTAINER_RUNTIMES:
+            continue
+        for opt, val in _run_options(args):
+            v = (val or "").strip()
+            if opt == "--privileged" and v.lower() != "false":
+                high.append("--privileged")
+            elif opt == "--cap-add" and v.upper().removeprefix("CAP_") \
+                    in _DANGEROUS_CAPS:
+                high.append(f"--cap-add {v}")
+            elif opt in ("-v", "--volume", "--mount"):
+                src = _mount_source(v)
+                if src in ("/", "\\") or re.fullmatch(r"[A-Za-z]:[\\/]?", src):
+                    high.append("mounts the whole host file system")
+                elif any(s in src.lower() for s in _ENGINE_SOCKETS):
+                    high.append("mounts the container engine's socket")
+            elif opt in ("--network", "--net", "--pid", "--ipc", "--userns",
+                         "--uts") and v.lower() == "host":
+                medium.append(f"{opt} host")
+            elif opt == "--security-opt" and "unconfined" in v.lower():
+                medium.append(f"--security-opt {v.split('=')[0]}=unconfined")
+    findings = []
+    if high:
+        findings.append(_finding(
+            "high", "container-escape",
+            "container started with " + ", ".join(dict.fromkeys(high)) + " \u2014 it can "
+            "reach or take over the host, so it is not a sandbox"))
+    if medium:
+        findings.append(_finding(
+            "medium", "container-isolation",
+            "container started with " + ", ".join(dict.fromkeys(medium)) + " \u2014 less "
+            "isolation than a default container"))
+    return findings
+
+
 STATIC_DETECTORS = (
     detect_unauditable,
     detect_suspicious_command,
@@ -1563,6 +1707,8 @@ STATIC_DETECTORS = (
     detect_known_bad,
     detect_floating_version,
     detect_secret_env,
+    detect_secret_header,
+    detect_container_escape,
 )
 
 
@@ -1574,6 +1720,8 @@ DETECTOR_SUBJECT = {
     "detect_known_bad": "known-vulnerable packages",
     "detect_floating_version": "package pinning",
     "detect_secret_env": "secrets in env",
+    "detect_secret_header": "secrets in headers",
+    "detect_container_escape": "container options",
 }
 
 

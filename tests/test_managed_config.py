@@ -136,7 +136,7 @@ class TestAudited(unittest.TestCase):
 
     def test_a_file_with_two_server_objects_is_still_one_line(self):
         with isolated_machine() as (home, cwd):
-            path = write_json(
+            write_json(
                 os.path.join(home, *PATHS[platform_system()][1]),
                 {"mcpServers": {"a": OK}, "servers": {"b": OK, "c": OK}})
             code, out, err = run_cli()

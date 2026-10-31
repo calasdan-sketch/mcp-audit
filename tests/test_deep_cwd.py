@@ -27,7 +27,7 @@ from mcp_audit import deep as deep_mod
 
 from _support import (isolated_machine, private_tempdir, run_cli, write_json,
                       write_text)
-from test_deep_probe import fixture, server
+from test_deep_probe import server
 
 POSIX = os.name == "posix"
 NEEDS_SHEBANG = unittest.skipUnless(

@@ -6,7 +6,6 @@ without advisories.json; load_advisories() swallowed the OSError and returned
 100/100 where a checkout said 90/100 "known vulnerable". Nothing said so.
 """
 
-import io
 import json
 import os
 import re

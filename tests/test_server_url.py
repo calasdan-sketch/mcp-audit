@@ -148,11 +148,13 @@ class TestThroughTheCommandLine(unittest.TestCase):
                 self.assertNotIn(SECRET, out + err)
                 self.assertNotIn("unauditable", out)
         results = {r["name"]: r for r in json.loads(outs["json"][1])["results"]}
-        self.assertEqual(checks(results["vendor"]["findings"]), [REMOTE])
+        # the literal "Authorization: Bearer ..." is itself a finding now
+        self.assertEqual(checks(results["vendor"]["findings"]),
+                         [REMOTE, ("medium", "secret-header")])
         self.assertEqual(results["local"]["findings"], [])
         sarif = json.loads(outs["sarif"][1])
         self.assertEqual({r["ruleId"] for r in sarif["runs"][0]["results"]},
-                         {"remote-server"})
+                         {"remote-server", "secret-header"})
 
 
 class TestAUrlDoesNotHideTheLaunch(unittest.TestCase):

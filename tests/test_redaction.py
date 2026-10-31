@@ -8,7 +8,6 @@ security tool that leaks the secrets it finds is worse than none.
 
 import json
 import os
-import re
 import unittest
 import unittest.mock
 

@@ -5,8 +5,6 @@ were left out and the hosts of the URLs in them - never an argument as
 written (see mcp_audit.launch, and test_secret_args for the leak matrix).
 """
 
-import contextlib
-import io
 import os
 import unittest
 import unittest.mock
