@@ -1,6 +1,6 @@
-"""Keep secrets out of everything mcp-audit prints.
+"""Keep secrets out of everything mcp-gradecard prints.
 
-mcp-audit reads configs that hold credentials (URLs with a password, tokens
+mcp-gradecard reads configs that hold credentials (URLs with a password, tokens
 in a query string, API keys in env, Authorization headers). Whatever it
 prints - the human report, --format json, SARIF (which people upload to
 GitHub), the --fix plan, the --deep notice - must never repeat one. The

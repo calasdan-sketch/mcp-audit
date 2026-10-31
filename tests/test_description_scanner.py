@@ -25,9 +25,9 @@ import unittest
 import unittest.mock
 import urllib.parse
 
-from mcp_audit import deep as deep_mod
-from mcp_audit import poisoning
-from mcp_audit import scoring
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import poisoning
+from mcp_gradecard import scoring
 
 from _support import FIX, isolated_machine, run_all_formats, run_cli, write_json
 
@@ -785,9 +785,9 @@ class TestTheScannerIsLoadedWhenUsed(unittest.TestCase):
     def loaded(self, *argv):
         env = {k: v for k, v in os.environ.items()
                if k != "PYTHONUNBUFFERED"}
-        code = ("import sys, mcp_audit.cli as c; "
+        code = ("import sys, mcp_gradecard.cli as c; "
                 "c.main(sys.argv[1:]); "
-                "sys.stderr.write('LOADED=%s' % ('mcp_audit.poisoning' "
+                "sys.stderr.write('LOADED=%s' % ('mcp_gradecard.poisoning' "
                 "in sys.modules))")
         p = subprocess.run([sys.executable, "-c", code, *argv], cwd=ROOT,
                            env=env, stdin=subprocess.DEVNULL,

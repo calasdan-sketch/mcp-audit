@@ -101,7 +101,7 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
     s = redact.sanitize
     warnings = warnings or []
     rule = sym("─")
-    lines = ["", f"{rule * 2} mcp-audit {rule * 39}"]
+    lines = ["", f"{rule * 2} mcp-gradecard {rule * 39}"]
     for w in warnings:
         lines.append(f"  [!] skipped {s(w['path'])} <{s(w['client'])}>: "
                      f"{s(w['reason'])}")
@@ -123,7 +123,7 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
                          "0 servers configured")
     if not results:
         if n_configs == 0:
-            lines.append(f"  [mcp-audit] warning: no MCP configs discovered "
+            lines.append(f"  [mcp-gradecard] warning: no MCP configs discovered "
                          f"{sym('—')} this is not a clean bill of health.")
         else:
             lines.append("  no MCP servers found in audited configs.")
@@ -150,7 +150,7 @@ def render_human(results: list[dict], warnings: list[dict] | None = None,
               f"(crit={s['by_severity']['critical']} high={s['by_severity']['high']} "
               f"med={s['by_severity']['medium']} low={s['by_severity']['low']})"]
     if warnings:
-        lines.append(f"  [mcp-audit] warning: {len(warnings)} config file(s) "
+        lines.append(f"  [mcp-gradecard] warning: {len(warnings)} config file(s) "
                      f"existed but were not audited {sym('—')} results are "
                      "not a clean bill of health.")
     lines.append(rule * 50)
@@ -192,7 +192,7 @@ def render_sarif(results: list[dict], version: str) -> dict:
         "version": "2.1.0",
         "runs": [{
             "tool": {"driver": {
-                "name": "mcp-audit", "version": version,
+                "name": "mcp-gradecard", "version": version,
                 "informationUri":
                     "https://github.com/calasdan-sketch/mcp-audit",
                 "rules": list(rules.values())}},

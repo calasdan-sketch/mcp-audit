@@ -2,16 +2,16 @@
 
 They name the program, the package or script it starts, how many arguments
 were left out and the hosts of the URLs in them - never an argument as
-written (see mcp_audit.launch, and test_secret_args for the leak matrix).
+written (see mcp_gradecard.launch, and test_secret_args for the leak matrix).
 """
 
 import os
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import deep as deep_mod
-from mcp_audit import launch
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import launch
 
 from _support import isolated_machine, run_cli, write_json
 

@@ -14,7 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
-from mcp_audit import cli as cli_mod
+from mcp_gradecard import cli as cli_mod
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -68,7 +68,7 @@ class TestRealClosedPipe(unittest.TestCase):
         # Buffered stdout is what a user has; an environment that sets
         # PYTHONUNBUFFERED hides the failure until the very last byte.
         env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
-        p = subprocess.Popen([sys.executable, "-m", "mcp_audit", "--help"],
+        p = subprocess.Popen([sys.executable, "-m", "mcp_gradecard", "--help"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              cwd=REPO, env=env)
         p.stdout.close()

@@ -6,7 +6,7 @@ the value of a flag on a short list of names was masked: `--auth X`,
 `--config '{"token": "X"}'` went out whole on stderr, where CI keeps its logs.
 No list of names catches every way a credential gets onto a command line (a
 bare positional token is one), so those two places no longer print arguments
-at all (see mcp_audit.launch), and the list of names grew for the places that
+at all (see mcp_gradecard.launch), and the list of names grew for the places that
 still scrub free text.
 
 This file plants one fake secret in each shape and greps every byte the tool
@@ -21,9 +21,9 @@ import tempfile
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import deep as deep_mod
-from mcp_audit import detectors
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import detectors
 
 from _support import FIX, isolated_machine, run_cli, run_all_formats, write_json
 
@@ -238,7 +238,7 @@ class TestARealRun(unittest.TestCase):
     def run_audit(self, *argv):
         env = {k: v for k, v in os.environ.items()
                if k != "PYTHONUNBUFFERED"}  # buffered, as a user has it
-        return subprocess.run([sys.executable, "-m", "mcp_audit", *argv],
+        return subprocess.run([sys.executable, "-m", "mcp_gradecard", *argv],
                               cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               timeout=120)

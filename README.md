@@ -1,4 +1,6 @@
-# mcp-audit
+# mcp-gradecard
+
+Formerly mcp-audit (renamed for PyPI; the GitHub repo keeps its old name). The old `mcp-audit` command still works as an alias.
 
 `npm audit` for your agent's MCP tool supply chain. Scans every MCP server
 installed across your clients (Claude Code incl. its per-project "local" scope
@@ -15,16 +17,16 @@ Zero dependencies — Python 3.10+ stdlib only.
 
 ```bash
 pip install git+https://github.com/calasdan-sketch/mcp-audit
-mcp-audit                         # auto-discovers installed clients
+mcp-gradecard                         # auto-discovers installed clients
 ```
 
-Or from a clone without installing: `python3 -m mcp_audit` (same flags).
+Or from a clone without installing: `python3 -m mcp_gradecard` (same flags).
 
 ## Usage
 
 ```bash
 # Static audit (safe: reads configs only, never executes servers)
-python3 -m mcp_audit
+python3 -m mcp_gradecard
 
 # Deep audit: also launch each stdio server and scan its live tool
 # descriptions for prompt-injection. This EXECUTES the servers: it lists
@@ -32,31 +34,31 @@ python3 -m mcp_audit
 # could not analyze, and the ones that come from project files in the current
 # directory. Each one starts in an empty temporary directory, not in the one
 # you are in.
-python3 -m mcp_audit --deep
-python3 -m mcp_audit --deep --probe-critical   # launch the left-out ones too
-python3 -m mcp_audit --deep --probe-project    # launch the project's too
+python3 -m mcp_gradecard --deep
+python3 -m mcp_gradecard --deep --probe-critical   # launch the left-out ones too
+python3 -m mcp_gradecard --deep --probe-project    # launch the project's too
 
 # Audit a specific file, JSON output for CI, fail the build on highs
-python3 -m mcp_audit --config ~/.claude.json --format json --fail-on high
+python3 -m mcp_gradecard --config ~/.claude.json --format json --fail-on high
 
 # SARIF 2.1.0 for GitHub code scanning / IDE viewers
-python3 -m mcp_audit --format sarif > mcp-audit.sarif
+python3 -m mcp_gradecard --format sarif > mcp-gradecard.sarif
 
 # Trust a host of your own (repeatable; https and wss only): a remote MCP
 # server, package registry or git forge there is no longer reported
-python3 -m mcp_audit --allow-host mcp.corp.example --allow-host '*.mirror.corp.example'
+python3 -m mcp_gradecard --allow-host mcp.corp.example --allow-host '*.mirror.corp.example'
 
 # Also look up pinned npx/uvx packages in OSV (network; sends name+version)
-python3 -m mcp_audit --online
+python3 -m mcp_gradecard --online
 
 # Print the version and stop
-python3 -m mcp_audit --version
+python3 -m mcp_gradecard --version
 
 # Preview which servers --fix would remove, then remove them (it asks first
 # and backs the file up; --yes when there is no terminal to ask on)
-python3 -m mcp_audit --fix
-python3 -m mcp_audit --fix --remove
-python3 -m mcp_audit --fix --remove --yes
+python3 -m mcp_gradecard --fix
+python3 -m mcp_gradecard --fix --remove
+python3 -m mcp_gradecard --fix --remove --yes
 ```
 
 Exit codes: `0` = the run finished and no `--fail-on` threshold was met.
@@ -65,16 +67,16 @@ findings**: the report carries them, and `--fail-on critical` (or `high`,
 `medium`, `low`) is what makes a finding fail a build. `1` = the `--fail-on`
 threshold was met, `2` = no verdict: a CLI error (including an explicit
 `--config` path that is
-missing, unreadable, unparseable, or an unrecognized shape — mcp-audit fails
+missing, unreadable, unparseable, or an unrecognized shape — mcp-gradecard fails
 closed rather than reporting "no MCP servers found"), the built-in
 advisory feed cannot be loaded (a broken install must not grade vulnerable
 packages as clean), `--fix --remove` has no terminal to ask on and no
 `--yes` or could not rewrite a file, `--fail-on` is given and a discovered
-config file could not be audited (see below), or mcp-audit hit an internal
+config file could not be audited (see below), or mcp-gradecard hit an internal
 error. An internal error prints the exception class and `file.py:line`
 (never the message, which can quote your config) and exits `2`, because `1`
 means findings; `MCP_AUDIT_DEBUG=1` prints the traceback as well, for
-whoever debugs mcp-audit, and the status is still `2`. When both apply,
+whoever debugs mcp-gradecard, and the status is still `2`. When both apply,
 findings win: `1`. A run that a signal cuts short
 (Ctrl-C, `kill`, a closed terminal) has no verdict and prints no report: it
 exits with 128 plus the signal number, as a shell reports it (`130`, `143`,
@@ -85,7 +87,7 @@ launched are stopped.
 
 Locations and key names come from each client's own documentation (read on
 2026-10-17); a location marked **unverified** could not be confirmed there and
-is probed on a best-effort basis. Run `mcp-audit` from the project root to
+is probed on a best-effort basis. Run `mcp-gradecard` from the project root to
 include the project-level files (only the current directory is looked at):
 the locations below that start with `./`. They are audited like any other,
 but under `--deep` their servers are listed and **not launched** unless you
@@ -150,8 +152,8 @@ unknown shape produces a **warning** (a `[!]` line in human output, a
 `"warnings"` entry in `--format json`) instead of a silent skip. A known
 client's config with none of those keys - a fresh Claude Desktop config, VS
 Code settings without an `mcp` block - is **0 servers configured** (an `[i]`
-line), not a warning. When zero configs are discovered at all, mcp-audit
-prints `[mcp-audit] warning: no MCP configs discovered - this is not a clean
+line), not a warning. When zero configs are discovered at all, mcp-gradecard
+prints `[mcp-gradecard] warning: no MCP configs discovered - this is not a clean
 bill of health` rather than "no findings". On a console that cannot show
 `✓`/`─` (Windows cp1252 pipes) the report falls back to `[ok]`/`-`.
 
@@ -196,7 +198,7 @@ is stdlib-only). They are listed here instead of guessed.
 Weekly cron example (uses the installed console script):
 
 ```bash
-0 9 * * 1 mcp-audit --format json --fail-on high > /var/log/mcp-audit.json
+0 9 * * 1 mcp-gradecard --format json --fail-on high > /var/log/mcp-gradecard.json
 ```
 
 ## What it checks
@@ -212,14 +214,14 @@ Weekly cron example (uses the installed console script):
 | `package-registry` | medium / high | The packages come from a registry other than the default, so whoever runs it can run code as you: `--registry`, `--@scope:registry=`, `--index-url`, `-i`, `--index`, `--default-index`, `--extra-index-url`, `-f`/`--find-links` before the package, or `NPM_CONFIG_REGISTRY`, `YARN_NPM_REGISTRY_SERVER`, `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL` in `env`. **Medium** over https; **high** over plain http, where anyone on the way can swap what it serves. Not reported: the default registries (`registry.npmjs.org`, `registry.yarnpkg.com`, `pypi.org`, `pypi.python.org`, `files.pythonhosted.org`), one on the local machine and one named with `--allow-host` (over https). A flag after the package belongs to the program being run, not to the runner, and is an ordinary URL |
 | `known-vulnerable` | medium to crit | Package matches the built-in advisory feed (`advisories.json`; the entry sets the grade, unverified entries are capped at medium) or, with `--online`, an OSV record (high) |
 | `osv-lookup` | low | `--online` only: the OSV lookup for a pinned package failed (no network, a timeout, an answer that is not JSON). The message names the package and version; a lookup that fails is a finding, never a silent pass. A lookup that succeeds and finds a record is `known-vulnerable` |
-| `floating-version` | medium | A package that is not pinned to one release, so every launch can pull a different one: no version (`npx -y pkg`, `uvx pkg`), a tag (`pkg@latest`, `@next`) or a range (`^1.2.0`, `~1`, `>=1`, `1.x`, `*`, `pkg>=1`, `pkg==1.*`). An exact version (`pkg@1.2.3`, `uvx pkg==1.2.3`) or a `sha256:` digest is pinned. Read through `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `uvx`, `uv tool run`, `pipx run` and through `cmd /c`, `bash -lc`, `env` and `sudo`. An option named for a credential (`--auth`, `--token`, `--password`; not `--no-auth` and the like) ahead of the package takes the next argument as its value, so a secret is never read as the package. Any other option that mcp-audit has in none of its tables (the ones that take a value and the ones that do not) leaves the package unnamed: the word after it could be its value, and the finding says `package not shown`. A git, URL, tarball or path spec has no version to judge here (a git spec on a forge is judged by `git-source`) |
+| `floating-version` | medium | A package that is not pinned to one release, so every launch can pull a different one: no version (`npx -y pkg`, `uvx pkg`), a tag (`pkg@latest`, `@next`) or a range (`^1.2.0`, `~1`, `>=1`, `1.x`, `*`, `pkg>=1`, `pkg==1.*`). An exact version (`pkg@1.2.3`, `uvx pkg==1.2.3`) or a `sha256:` digest is pinned. Read through `npx`, `bunx`, `pnpm dlx`, `yarn dlx`, `npm exec`, `uvx`, `uv tool run`, `pipx run` and through `cmd /c`, `bash -lc`, `env` and `sudo`. An option named for a credential (`--auth`, `--token`, `--password`; not `--no-auth` and the like) ahead of the package takes the next argument as its value, so a secret is never read as the package. Any other option that mcp-gradecard has in none of its tables (the ones that take a value and the ones that do not) leaves the package unnamed: the word after it could be its value, and the finding says `package not shown`. A git, URL, tarball or path spec has no version to judge here (a git spec on a forge is judged by `git-source`) |
 | `secret-env` | medium | Server receives credentials via env: any variable whose name has a `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `AUTHORIZATION`, `BEARER`, `COOKIE`, `DSN`, `PAT` or `APIKEY` word, or whose last word is `AUTH` or `PASS` (`API_KEY`, `OPENAI_KEY`, `accessToken`, `DB_PASSWORD`, `MY_PASS`, `BASIC_AUTH`). `PUBLIC_KEY`, `KEYBOARD_LAYOUT`, `AUTH_URL` and `PASS_THROUGH` are not flagged. Only the names are printed |
 | `secret-header` | medium | A remote server's `headers` carry a credential as a literal value (`Authorization: Bearer sk-...`, `X-API-Key`, or a header named like a `secret-env` variable), so the file holds it in plain text. A reference (`Bearer ${GITHUB_TOKEN}`, `$VAR`, `%VAR%`, `${input:id}`, `{env:VAR}`) is the safe form and is not flagged. Only the header names are printed, never a value |
 | `container-escape` | high | A `docker`, `podman` or `nerdctl` `run` that removes the container's isolation: `--privileged`, `--cap-add` of `ALL`, `SYS_ADMIN`, `SYS_MODULE`, `SYS_PTRACE`, `SYS_RAWIO` or `DAC_READ_SEARCH`, a mount of the whole host file system (`-v /:/host`, `C:\`), or a mount of the engine's socket (`docker.sock`). Only the options before the image are read; an ordinary folder mount or published port is not flagged |
-| `container-isolation` | medium | The same commands with `--network host` (or `--pid`, `--ipc`, `--userns`, `--uts host`), or a `--security-opt` that is `unconfined`. A value in a form mcp-audit does not read (an option it has no table entry for ahead of the image) can hide one of these: it is a list, and what is not on it is not seen |
+| `container-isolation` | medium | The same commands with `--network host` (or `--pid`, `--ipc`, `--userns`, `--uts host`), or a `--security-opt` that is `unconfined`. A value in a form mcp-gradecard does not read (an option it has no table entry for ahead of the image) can hide one of these: it is a list, and what is not on it is not seen |
 | `remote-server` | medium | A non-local MCP server: a `url` or `serverUrl` entry, or the address given to a bridge - `mcp-remote`, `mcp-proxy` or `supergateway`, also started through `npx`, `bunx`, `pnpm dlx`, `uvx`, `cmd /c` or `bash -lc` - so traffic leaves the machine by design, as with a `url` entry. A bridge has one server: the URL after `--sse`, `--streamableHttp`, `--url` or `--remote`, or else the first URL it is given; any other URL is an endpoint. Not reported: a local server, or one named with `--allow-host` (https and wss only) |
 | `unparseable-url` | high | A URL in the config that cannot be taken apart (`http://[x`), or whose host depends on the parser that reads it (`https://evil.example\@api.github.com/`: Python says api.github.com, Node says evil.example): where it points is unknown, so it is treated as unsafe. The second kind comes with the remote endpoint it can point to. One bad URL never hides another |
-| `detector-error` | high | A check crashed on this entry, or could not read all of it (a command line over 1,000,000 characters or nested too deeply, a script with more than 2,000 different URLs). mcp-audit fails closed: this is a visible HIGH finding (so `--fail-on high` trips), never a quiet pass. Only the exception class is shown |
+| `detector-error` | high | A check crashed on this entry, or could not read all of it (a command line over 1,000,000 characters or nested too deeply, a script with more than 2,000 different URLs). mcp-gradecard fails closed: this is a visible HIGH finding (so `--fail-on high` trips), never a quiet pass. Only the exception class is shown |
 | `invalid-config` | high | The entry is not an object, or `command`/`args`/`env`/`url`/`serverUrl` has the wrong type |
 | `deep-probe` | low | `--deep` only: the server was not launched (it has critical findings, a `detector-error` or `unparseable-url` or a registry over plain http, it comes from a project file in the current directory, it is disabled in its config, or it is remote), could not be probed (did not start, silent, exited early, sent too much output), or only part of its tools were read |
 | `unauditable` | low | The entry has neither `command` nor `url`/`serverUrl` (for instance a Zed server provided by an extension): what it runs is not in the config |
@@ -264,7 +266,7 @@ stderr):
   printed. They say what runs: the program, the package or script it starts
   (`npx some-server@1.2.3`, `node server.js`), how many arguments were left
   out, and the host of each URL in them (shortened as above). The package is
-  named only when every option before it is one whose shape mcp-audit knows;
+  named only when every option before it is one whose shape mcp-gradecard knows;
   after any other the line says `(package not shown)`, because the word that
   follows could be that option's value, and the `floating-version` finding
   and the `--online` lookup leave it alone too. Any argument
@@ -328,13 +330,13 @@ browsers) read some strings differently, so each URL is read both ways:
   resolves) and a non-ASCII name are never taken for the local machine or a
   trusted host, and a name that cannot be encoded is an `unparseable-url`.
   Numeric spellings of an address (`0x7f.1`,
-  `2130706433`, `0177.0.0.1`) are plain names to mcp-audit, so they are
+  `2130706433`, `0177.0.0.1`) are plain names to mcp-gradecard, so they are
   reported as remote even when they mean loopback.
 
 Allowlisted API hosts (HTTPS/WSS only, exact host match; `.googleapis.com`
 covers subdomains): `api.github.com`, `api.openai.com`, `api.anthropic.com`,
 `*.googleapis.com`, `api.slack.com`, `api.notion.com`, `api.linear.app`,
-`api.stripe.com` — see `ALLOWED_API_HOSTS` in `mcp_audit/detectors.py`. These
+`api.stripe.com` — see `ALLOWED_API_HOSTS` in `mcp_gradecard/detectors.py`. These
 are vendor endpoints official servers are configured with
 (e.g. `GITHUB_API_URL=https://api.github.com`), not places an attacker can
 receive data. The other lists built in are the git forges (`github.com`,
@@ -395,7 +397,7 @@ runner.
 ### Trusting a host
 
 `--allow-host HOST` (repeatable) names a host you trust. There is no config
-file - mcp-audit reads no settings of its own - so the option goes on every
+file - mcp-gradecard reads no settings of its own - so the option goes on every
 run: in the CI command, in a shell alias.
 
 - `HOST` is a name (`mcp.corp.example`), `*.corp.example` for every host below
@@ -403,7 +405,7 @@ run: in the CI command, in a shell alias.
   wildcard anywhere but in front, a wildcard over a whole top-level domain
   (`*.com`) and a non-ASCII name (write it `xn--...`) are refused with exit
   code `2`. The refusal does not repeat the value, which may hold a credential.
-  mcp-audit has no list of public suffixes, so `*.co.uk` is accepted and
+  mcp-gradecard has no list of public suffixes, so `*.co.uk` is accepted and
   trusts every host below it: write the name you mean.
 - The host is trusted for what it is: a `url` entry or a bridge's server, a
   registry, a git forge (a source there is then judged by its pin, as a
@@ -432,7 +434,7 @@ left out, the hosts of its URLs; never an argument), and changes nothing.
 `--fix --remove` shows the same list and asks `[y/N]` before it removes
 anything. With no terminal to ask on (CI, a pipe) it refuses and exits `2`,
 unless `--yes` is given; with nothing to remove it needs no answer. Before a
-file is touched it is copied to `<path>.mcp-audit.bak-<timestamp>` (`-1`,
+file is touched it is copied to `<path>.mcp-gradecard.bak-<timestamp>` (`-1`,
 `-2`... when that name is taken: a backup is never overwritten, and it is
 the original byte for byte). The new file is written beside the old one and
 moved into place in one step, so a crash or a full disk leaves the old file;
@@ -520,7 +522,7 @@ repository's `.mcp.json` runs whatever its author wrote - so:
   the list says so. A `cwd` field in a server entry is not used.
 - **One deadline for the whole probe** (15 s), enforced from outside the
   server: a server that never answers, answers slowly, or has a child that
-  keeps its output pipe open cannot hold mcp-audit (or CI) past it. The
+  keeps its output pipe open cannot hold mcp-gradecard (or CI) past it. The
   server starts in its own session (POSIX) or process group (Windows) and
   its whole process tree is killed when the probe ends, however it ends - on
   Windows with `taskkill /T /F`, a code path that this repository tests only
@@ -528,11 +530,11 @@ repository's `.mcp.json` runs whatever its author wrote - so:
   that deliberately leaves the session (`setsid`) is not reached, but it
   cannot hold the probe either.
 - **A signal stops the servers too.** Ctrl-C, `kill` (SIGTERM) and a closed
-  terminal (SIGHUP) reach mcp-audit and not its server, which has a session
+  terminal (SIGHUP) reach mcp-gradecard and not its server, which has a session
   of its own. While a server runs they kill its whole tree first, then end
-  mcp-audit with exit code 128 plus the signal number (`130`, `143`, `129`),
+  mcp-gradecard with exit code 128 plus the signal number (`130`, `143`, `129`),
   a note on stderr and no report: a run that was cut short has no verdict.
-  A signal that was being ignored (`nohup mcp-audit --deep &` ignores
+  A signal that was being ignored (`nohup mcp-gradecard --deep &` ignores
   SIGHUP) stays ignored. On Windows Ctrl-C and Ctrl-Break are handled the
   same way (**unverified**, like `taskkill`).
 - **Output is capped.** A line over 4 MiB, or more than 16 MiB in total,
@@ -544,7 +546,7 @@ repository's `.mcp.json` runs whatever its author wrote - so:
   `PATHEXT`, `PROCESSOR_ARCHITECTURE`, `SYSTEMDRIVE`, `SYSTEMROOT`, `TEMP`,
   `TMP`, `USERNAME`, `USERPROFILE`, `WINDIR`) plus the `env` of its own
   config entry - not the API keys, tokens and proxy passwords of the shell
-  that ran mcp-audit. A server that needs one gets it from its `env`; one
+  that ran mcp-gradecard. A server that needs one gets it from its `env`; one
   that must download through a proxy may fail to start, and says so.
 - **A probe that falls short is visible.** A server that does not start,
   stays silent, exits before it lists its tools or floods is a low
@@ -635,12 +637,12 @@ The scanner is loaded only by `--deep`.
 ## Advisory feed
 
 The feed ships inside the package as package data (wheel and sdist both
-contain `mcp_audit/advisories.json`) and is read with `importlib.resources`.
-If it is missing or malformed mcp-audit exits 2 and says so, instead of
+contain `mcp_gradecard/advisories.json`) and is read with `importlib.resources`.
+If it is missing or malformed mcp-gradecard exits 2 and says so, instead of
 quietly reporting every known-vulnerable package as clean. The test-suite
 builds the wheel, unpacks it elsewhere and runs the installed copy.
 
-`mcp_audit/advisories.json` carries three entries, each checked on 2026-10-18
+`mcp_gradecard/advisories.json` carries three entries, each checked on 2026-10-18
 against the public record it cites (the `source` field says which):
 
 - `mcp-server-fetch`: CVE-2026-104120, a server-side request forgery in
@@ -697,7 +699,7 @@ reason, when the interpreter cannot build a wheel at all).
 
 ## Limitations
 
-What mcp-audit does not do, so that you do not find out the hard way:
+What mcp-gradecard does not do, so that you do not find out the hard way:
 
 **Reading configs**
 
@@ -735,11 +737,11 @@ What mcp-audit does not do, so that you do not find out the hard way:
   externally. `--online` looks up exact npm and PyPI versions only.
 - URLs are found by their `http:`, `https:`, `ws:` or `wss:` start followed
   by at least one slash or backslash. A URL parser also accepts `http:host`
-  with no slash at all, which mcp-audit does not look for.
+  with no slash at all, which mcp-gradecard does not look for.
 - A URL in launch args that is not a git source, a registry or a bridge's
   server is critical even when legitimate. `--allow-host` trusts a host over
   https or wss; plain http is never trusted. `ALLOWED_API_HOSTS`, `GIT_FORGES`,
-  `DEFAULT_REGISTRIES` and `BRIDGES` in `mcp_audit/detectors.py` are the lists
+  `DEFAULT_REGISTRIES` and `BRIDGES` in `mcp_gradecard/detectors.py` are the lists
   built in. A bridge's second URL, and one on a private address such as
   `http://192.168.1.20:3000/`, are URLs like any other.
 
@@ -764,11 +766,11 @@ What mcp-audit does not do, so that you do not find out the hard way:
   probe rather than skipped silently. Remote (`url` or `serverUrl`) servers
   are not probed.
 - Project files are not launched without `--probe-project`, whoever wrote
-  them: mcp-audit cannot tell your own project from a stranger's. A file you
+  them: mcp-gradecard cannot tell your own project from a stranger's. A file you
   name with `--config` counts as yours even when it sits in a repository you
   have cloned, so point `--config` only at files you would run.
 - The program is looked up on `PATH` only (so Windows `npx.cmd` shims
-  launch), by mcp-audit and not by `shutil.which`: a file in the current
+  launch), by mcp-gradecard and not by `shutil.which`: a file in the current
   directory, in the directory the server starts in, or under an empty or
   relative `PATH` entry is not used, and neither is `PATH` naming the
   current directory itself. A command that is a path is used as written, a
@@ -815,7 +817,7 @@ What mcp-audit does not do, so that you do not find out the hard way:
   killed when the probe ends, though it cannot hold the probe. On Windows the
   tree is killed with `taskkill /T /F`, which is **unverified** on a real
   Windows machine.
-- A signal that cannot be caught (`kill -9`, `taskkill /F` on mcp-audit
+- A signal that cannot be caught (`kill -9`, `taskkill /F` on mcp-gradecard
   itself, a power cut) leaves the server it was probing to notice for itself
   that its input has closed, as a stdio server is expected to. What Windows
   does to the server when the console window is closed or the user logs off

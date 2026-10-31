@@ -1,0 +1,3 @@
+"""mcp-gradecard: `npm audit` for your agent's MCP tool supply chain."""
+
+__version__ = "0.3.0"

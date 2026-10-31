@@ -4,7 +4,7 @@ Launches the server over stdio, runs the initialize handshake, lists its
 tools (following pagination) and scans the descriptions for prompt-injection
 patterns.
 
-This EXECUTES the server, with the rights of whoever runs mcp-audit. It is
+This EXECUTES the server, with the rights of whoever runs mcp-gradecard. It is
 opt-in (--deep); the CLI lists what it is about to launch before it launches
 anything, and leaves out servers that have critical static findings unless
 --probe-critical says otherwise. What bounds a probe:
@@ -13,18 +13,18 @@ anything, and leaves out servers that have critical static findings unless
   process it started) does with its pipes;
 * the server starts in its own session (POSIX) or process group (Windows)
   and the whole tree is killed when the probe ends, however it ends - a
-  signal that ends mcp-audit itself (Ctrl-C, SIGTERM, SIGHUP) included: see
+  signal that ends mcp-gradecard itself (Ctrl-C, SIGTERM, SIGHUP) included: see
   stop_on_signals;
 * it starts in an empty directory of its own (private, in the temp directory,
   removed afterwards) unless the caller names one, and its program is looked
-  up on PATH only: see _find_program. The directory mcp-audit was run from
+  up on PATH only: see _find_program. The directory mcp-gradecard was run from
   is the one a clone you are auditing fills, and the one Windows searches
   first - without this, --deep run there would run the clone's files through
   your own servers (a node_modules copy for `npx -y @acme/mcp-thing`);
 * its output is read by a thread in raw chunks, with a cap on the length of a
   line and on the total, and only well-formed JSON-RPC responses are kept;
 * it gets a minimal environment (PATH, HOME and the like) plus the `env` of
-  its own config entry - not the secrets of the shell that ran mcp-audit.
+  its own config entry - not the secrets of the shell that ran mcp-gradecard.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ _NAME_SHOWN = 80
 # Windows branches on any machine.
 _IS_WINDOWS = os.name == "nt"
 
-# What a launched server inherits from the environment of mcp-audit: the
+# What a launched server inherits from the environment of mcp-gradecard: the
 # variables MCP's own client SDKs pass, plus the locale and temp directory.
 # Everything else - API keys, tokens, proxy URLs with passwords - stays out;
 # a server that needs a variable gets it from `env` in its config entry.
@@ -133,9 +133,9 @@ def _find_program(name: str, path: str, windows: bool | None = None,
     (by default, in every Python up to 3.14), where CreateProcess searches it
     first too, and an empty or relative entry of PATH means the current
     directory on POSIX.
-    What a server runs must not depend on where mcp-audit was started, so
+    What a server runs must not depend on where mcp-gradecard was started, so
     only absolute entries count, and not the directories in `avoid` (the one
-    mcp-audit was run from, the one the server starts in) even when PATH
+    mcp-gradecard was run from, the one the server starts in) even when PATH
     names them.
 
     Windows (`windows`): the extensions of `pathext` are tried in order, a
@@ -199,7 +199,7 @@ def _program(command: str, env: dict, start: str,
 def switched_off(cfg) -> str | None:
     """How a server entry says its client should not start it - `"disabled":
     true` or `"enabled": false` - or None. Only a JSON boolean counts: any
-    other value is not a switch that mcp-audit can say it understands. Which
+    other value is not a switch that mcp-gradecard can say it understands. Which
     clients write these keys is unverified."""
     if isinstance(cfg, dict):
         if cfg.get("disabled") is True:
@@ -286,7 +286,7 @@ class _Reader(threading.Thread):
     grandchild that had escaped the process group kept the pipe open)."""
 
     def __init__(self, stream) -> None:
-        super().__init__(name="mcp-audit-reader", daemon=True)
+        super().__init__(name="mcp-gradecard-reader", daemon=True)
         self._stream = stream
         self.messages: queue.Queue = queue.Queue()
 
@@ -442,7 +442,7 @@ def _converse(proc, reader: _Reader, deadline: float, timeout: float) -> dict:
     _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                  "params": {"protocolVersion": "2024-11-05",
                             "capabilities": {},
-                            "clientInfo": {"name": "mcp-audit",
+                            "clientInfo": {"name": "mcp-gradecard",
                                            "version": __version__}}})
     answer = _await(reader, 1, deadline, timeout)
     if "error" in answer:
@@ -576,11 +576,11 @@ def stop_on_signals():
     """While the body runs, a signal that ends a process stops the servers
     first and ends the pass with Interrupted (see _on_signal). Servers are in
     their own session, so the Ctrl-C of a terminal, a `kill` and a SIGHUP do
-    not reach them: without this they ended mcp-audit and left the servers
+    not reach them: without this they ended mcp-gradecard and left the servers
     running.
 
     The handlers that were there are put back afterwards. A signal that was
-    being ignored stays ignored (`nohup mcp-audit --deep &` ignores SIGHUP on
+    being ignored stays ignored (`nohup mcp-gradecard --deep &` ignores SIGHUP on
     purpose). Only the main thread can install a handler: anywhere else this
     does nothing."""
     saved = {}
@@ -658,7 +658,7 @@ def probe_server(cfg, timeout: float = 15, cwd: str | None = None) -> dict:
 
     The server starts in `cwd` when one is given (and that directory is left
     as it is), else in a new empty directory that is private to this user and
-    removed when the probe ends, however it ends: the directory mcp-audit was
+    removed when the probe ends, however it ends: the directory mcp-gradecard was
     run from is not the server's to use (see the top of this module)."""
     reason = not_launchable(cfg)
     if reason:
@@ -670,7 +670,7 @@ def probe_server(cfg, timeout: float = 15, cwd: str | None = None) -> dict:
     try:
         if cwd is None:
             try:
-                scratch = tempfile.mkdtemp(prefix="mcp-audit-")
+                scratch = tempfile.mkdtemp(prefix="mcp-gradecard-")
             except OSError:
                 return _failure("launch failed (no directory to start it in)")
             cwd = scratch

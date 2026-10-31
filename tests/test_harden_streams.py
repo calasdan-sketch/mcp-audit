@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 
-from mcp_audit import cli as cli_mod
+from mcp_gradecard import cli as cli_mod
 
 
 class TestHardenStreams(unittest.TestCase):

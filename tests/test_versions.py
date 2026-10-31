@@ -11,7 +11,7 @@ import json
 import unittest
 import unittest.mock
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 NO_FEED = []
 

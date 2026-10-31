@@ -1,4 +1,4 @@
-"""The value of an option mcp-audit does not know is not the package (Round 3
+"""The value of an option mcp-gradecard does not know is not the package (Round 3
 #6).
 
 `npx --weird-opt FAKESECRET -y pkg@1.0.0`: the tables of options that take a
@@ -15,9 +15,9 @@ import os
 import unittest
 import unittest.mock
 
-from mcp_audit import deep as deep_mod
-from mcp_audit import detectors
-from mcp_audit import launch
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import detectors
+from mcp_gradecard import launch
 
 from _support import isolated_machine, run_all_formats, write_json
 

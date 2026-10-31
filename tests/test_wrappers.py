@@ -11,7 +11,7 @@ import random
 import time
 import unittest
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 NO_FEED = []
 

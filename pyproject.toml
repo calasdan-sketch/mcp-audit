@@ -3,8 +3,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcp-audit"
-version = "0.2.4"
+name = "mcp-gradecard"
+version = "0.3.0"
 description = "Security auditor for MCP server configurations."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,15 +27,17 @@ Homepage = "https://github.com/calasdan-sketch/mcp-audit"
 Issues = "https://github.com/calasdan-sketch/mcp-audit/issues"
 
 [project.scripts]
-mcp-audit = "mcp_audit.cli:main"
+mcp-gradecard = "mcp_gradecard.cli:main"
+# Old command name, kept so existing users and scripts keep working.
+mcp-audit = "mcp_gradecard.cli:main"
 
 [tool.setuptools]
-packages = ["mcp_audit"]
+packages = ["mcp_gradecard", "mcp_audit"]
 
 # Without this the wheel has no advisory feed and every known-vulnerable
 # package reads as clean.
 [tool.setuptools.package-data]
-mcp_audit = ["advisories.json"]
+mcp_gradecard = ["advisories.json"]
 
 [tool.ruff]
 extend-exclude = [".venv-sop"]

@@ -191,7 +191,7 @@ _SERVER_KEYS = ("mcpServers", "servers", "mcp", "context_servers")
 
 #: The clients whose files are looked up in the current directory (every
 #: other location hangs off the home directory). They belong to the project,
-#: not to the person running mcp-audit: whoever wrote the project wrote them,
+#: not to the person running mcp-gradecard: whoever wrote the project wrote them,
 #: so --deep leaves their servers alone unless --probe-project is given.
 PROJECT_CLIENTS = ("claude-code-project", "cursor-project", "vscode-workspace",
                    "vscode-workspace-mcp", "devin-project", "zed-project")

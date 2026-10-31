@@ -1,4 +1,4 @@
-r"""The hosts a URL can be read as pointing to (mcp_audit.urls).
+r"""The hosts a URL can be read as pointing to (mcp_gradecard.urls).
 
 The allowlist decision is made on these, so the table below pins, for each
 spelling, every host a parser could connect to: Python's urlsplit (RFC 3986)
@@ -8,7 +8,7 @@ for instance on `https://evil.example\@api.github.com/c`.
 
 import unittest
 
-from mcp_audit import urls
+from mcp_gradecard import urls
 
 TAB, LF = "\t", "\n"
 KELVIN = chr(0x212A)

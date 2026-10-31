@@ -932,7 +932,7 @@ class Package(NamedTuple):
     exact: bool            # one release (or a digest): the same on every launch
     ecosystem: str         # "npm" or "PyPI"
     spec: str = ""         # the argument it was read from: "pkg@1.2.3"
-    #: False when an option mcp-audit does not know comes before it: the word
+    #: False when an option mcp-gradecard does not know comes before it: the word
     #: read as the package could be that option's value (a credential, say),
     #: so it is never printed or sent anywhere (see _only_known).
     sure: bool = True
@@ -1401,7 +1401,7 @@ def detect_floating_version(name: str, cfg: dict) -> list[dict]:
                 else f"{p.name}@x.y.z")
         if not p.sure:
             # (the word may be the value of an option, so it is not quoted)
-            msg = ("package not shown: an option mcp-audit does not know "
+            msg = ("package not shown: an option mcp-gradecard does not know "
                    "comes before it, so its name cannot be told from that "
                    "option's value. If it is not pinned to one release, every "
                    "launch can pull a different (possibly compromised) one: "

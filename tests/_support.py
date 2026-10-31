@@ -15,8 +15,8 @@ import shutil
 import tempfile
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import discovery
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import discovery
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -24,7 +24,7 @@ FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 # home, the empty directory --deep starts servers in) goes under one private
 # directory that is removed when the test process ends, instead of piling up
 # in the shared temporary directory. Child processes inherit it.
-_BASE = tempfile.mkdtemp(prefix="mcp-audit-tests-")
+_BASE = tempfile.mkdtemp(prefix="mcp-gradecard-tests-")
 tempfile.tempdir = _BASE
 for _var in ("TMPDIR", "TEMP", "TMP"):
     os.environ[_var] = _BASE
@@ -102,7 +102,7 @@ def private_tempdir():
     one directory of the test's own (tempfile.tempdir points there), so a test
     can say exactly what was left behind - and nothing outlives it in the
     shared temp directory. Yields that directory."""
-    base = tempfile.mkdtemp(prefix="mcp-audit-test-")
+    base = tempfile.mkdtemp(prefix="mcp-gradecard-test-")
     try:
         with unittest.mock.patch.object(tempfile, "tempdir", base):
             yield base

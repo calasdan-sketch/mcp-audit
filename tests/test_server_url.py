@@ -13,9 +13,9 @@ import json
 import os
 import unittest
 
-from mcp_audit import deep as deep_mod
-from mcp_audit import detectors
-from mcp_audit import launch
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import detectors
+from mcp_gradecard import launch
 
 from _support import isolated_machine, run_all_formats, write_json
 

@@ -11,11 +11,11 @@ import unittest
 import unittest.mock
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
-import mcp_audit
-from mcp_audit import deep as deep_mod
-from mcp_audit import discovery
-from mcp_audit import scoring
-from mcp_audit.cli import main as cli_main
+import mcp_gradecard
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import discovery
+from mcp_gradecard import scoring
+from mcp_gradecard.cli import main as cli_main
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 FAKE = os.path.join(FIX, "fake_mcp_server.py")
@@ -189,7 +189,7 @@ class TestCLI(unittest.TestCase):
             self.assertIn("beacon", data["mcpServers"])
             self.assertIn("helper", data["mcpServers"])
             self.assertIn("old-fetch", data["mcpServers"])
-            backups = [p for p in os.listdir(tmp) if ".mcp-audit.bak-" in p]
+            backups = [p for p in os.listdir(tmp) if ".mcp-gradecard.bak-" in p]
             self.assertEqual(len(backups), 1)
             with open(os.path.join(tmp, backups[0])) as f:
                 bak = json.load(f)["mcpServers"]
@@ -213,7 +213,7 @@ class TestCLI(unittest.TestCase):
                 self.assertEqual(f.read(), before)
             self.assertIn("would remove 'evil-pipe'", err.getvalue())
             self.assertEqual(
-                [p for p in os.listdir(tmp) if ".mcp-audit.bak-" in p], [])
+                [p for p in os.listdir(tmp) if ".mcp-gradecard.bak-" in p], [])
         finally:
             shutil.rmtree(tmp)
 
@@ -267,7 +267,7 @@ class TestCLI(unittest.TestCase):
                 data = json.load(f)
             self.assertIn("leaky", data["mcpServers"])
             self.assertIn("clean", data["mcpServers"])
-            backups = [p for p in os.listdir(tmp) if ".mcp-audit.bak-" in p]
+            backups = [p for p in os.listdir(tmp) if ".mcp-gradecard.bak-" in p]
             self.assertEqual(backups, [])
         finally:
             shutil.rmtree(tmp)
@@ -293,7 +293,7 @@ class TestCLI(unittest.TestCase):
             self.assertIn("signer", data["mcpServers"])
             # no backup written: nothing was removed
             self.assertEqual(
-                len([p for p in os.listdir(tmp) if ".mcp-audit.bak-" in p]), 0)
+                len([p for p in os.listdir(tmp) if ".mcp-gradecard.bak-" in p]), 0)
             out = json.loads(buf.getvalue())
             signer = [r for r in out["results"]
                       if r["name"] == "signer"][0]
@@ -327,7 +327,7 @@ class TestCLI(unittest.TestCase):
             _write_json(cfg_path, {"mcpServers": {}})
             err = io.StringIO()
             denied = PermissionError(13, "Permission denied", cfg_path)
-            with unittest.mock.patch("mcp_audit.cli.open", create=True,
+            with unittest.mock.patch("mcp_gradecard.cli.open", create=True,
                                      side_effect=denied), \
                     redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = cli_main(["--config", cfg_path, "--format", "json"])
@@ -388,7 +388,7 @@ class TestCLI(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 cli_main(["--version"])
         self.assertEqual(cm.exception.code, 0)
-        self.assertIn(mcp_audit.__version__, buf.getvalue())
+        self.assertIn(mcp_gradecard.__version__, buf.getvalue())
 
 
 @contextmanager
@@ -644,7 +644,7 @@ class TestDiscoveryRoots(unittest.TestCase):
     on any OS (regression: on Windows the suite read the developer's own
     %USERPROFILE%\\.claude.json and %APPDATA%\\Claude config)."""
 
-    def test_roots_follow_mcp_audit_home(self):
+    def test_roots_follow_mcp_gradecard_home(self):
         with _isolated_machine() as (home, cwd):
             r = discovery.roots()
             self.assertEqual(r["home"], home)
@@ -832,7 +832,7 @@ class TestConsoleEncoding(unittest.TestCase):
             s.flush()
         self.assertEqual(code, 0)
         out = raw.getvalue()
-        self.assertIn(b"-- mcp-audit ---", out)
+        self.assertIn(b"-- mcp-gradecard ---", out)
         self.assertIn(b"[ok] no findings", out)
         self.assertNotIn("✓".encode("utf-8"), out)
 
@@ -844,13 +844,13 @@ class TestConsoleEncoding(unittest.TestCase):
         env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
         for extra in ([], ["--format", "json"]):
             p = subprocess.run(
-                [sys.executable, "-m", "mcp_audit", "--config",
+                [sys.executable, "-m", "mcp_gradecard", "--config",
                  os.path.join(FIX, "nasty.json"), *extra],
                 cwd=root, env=env, capture_output=True, timeout=120)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn(b"Traceback", p.stderr)
         p = subprocess.run(
-            [sys.executable, "-m", "mcp_audit", "--config",
+            [sys.executable, "-m", "mcp_gradecard", "--config",
              os.path.join(FIX, "clean.json")],
             cwd=root, env=env, capture_output=True, timeout=120)
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -870,7 +870,7 @@ class TestSarif(unittest.TestCase):
         self.assertEqual(log["version"], "2.1.0")
         self.assertIn("sarif-2.1.0", log["$schema"])
         run = log["runs"][0]
-        self.assertEqual(run["tool"]["driver"]["name"], "mcp-audit")
+        self.assertEqual(run["tool"]["driver"]["name"], "mcp-gradecard")
         rule_ids = {r["id"] for r in run["tool"]["driver"]["rules"]}
         self.assertTrue(run["results"])
         for res in run["results"]:
@@ -899,7 +899,7 @@ class TestOnline(unittest.TestCase):
             return Resp(json.dumps({"vulns": [
                 {"id": "GHSA-xxxx", "summary": "bad thing"}]}).encode())
 
-        from mcp_audit import detectors
+        from mcp_gradecard import detectors
         cfg = {"command": "npx", "args": ["-y", "some-pkg@1.0.0"]}
         with unittest.mock.patch.object(detectors.urllib.request,
                                         "urlopen", fake_urlopen):
@@ -910,7 +910,7 @@ class TestOnline(unittest.TestCase):
         self.assertIn("GHSA-xxxx", f[0]["message"])
 
     def test_osv_skips_unpinned_and_survives_network_error(self):
-        from mcp_audit import detectors
+        from mcp_gradecard import detectors
 
         def boom(req, timeout=None):
             raise OSError("offline")

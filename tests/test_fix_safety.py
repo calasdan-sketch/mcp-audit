@@ -18,7 +18,7 @@ import tempfile
 import unittest
 import unittest.mock
 
-from mcp_audit import cli
+from mcp_gradecard import cli
 
 from _support import isolated_machine, run_cli, run_all_formats, write_bytes
 
@@ -52,7 +52,7 @@ def planted(tmp, servers=None, text=None):
 
 
 def backups(tmp):
-    return sorted(p for p in os.listdir(tmp) if ".mcp-audit.bak-" in p)
+    return sorted(p for p in os.listdir(tmp) if ".mcp-gradecard.bak-" in p)
 
 
 def read(path):

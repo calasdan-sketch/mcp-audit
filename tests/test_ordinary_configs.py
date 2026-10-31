@@ -12,7 +12,7 @@ import re
 import tempfile
 import unittest
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 from _support import isolated_machine, run_all_formats, run_cli, write_json
 

@@ -1,4 +1,4 @@
-"""mcp-audit: `npm audit` for your agent's MCP tool supply chain."""
+"""mcp-gradecard: `npm audit` for your agent's MCP tool supply chain."""
 
 import argparse
 import codecs
@@ -54,7 +54,7 @@ def _audit_all(discovered: list[dict], advisories: list[dict],
 
 def _note(text: str) -> None:
     """A line for the operator on stderr (stdout carries the report)."""
-    sys.stderr.write(f"[mcp-audit] {redact.clean(text)}\n")
+    sys.stderr.write(f"[mcp-gradecard] {redact.clean(text)}\n")
 
 
 def _has_critical(result: dict) -> bool:
@@ -201,7 +201,7 @@ def _deep_pass(results: list[dict], probe_critical: bool,
     probed, gets a low `deep-probe` finding: --deep never reports a server as
     read when it was not.
 
-    A signal that ends mcp-audit while a server runs (Ctrl-C, SIGTERM,
+    A signal that ends mcp-gradecard while a server runs (Ctrl-C, SIGTERM,
     SIGHUP) stops the server first and ends the run: deep_mod.Interrupted
     comes out of here and main() answers it. There is no report then."""
     off = {}    # the entries that switch themselves off, and how
@@ -385,7 +385,7 @@ def _dump(data, style: dict) -> bytes:
 
 def _write_backup(path: str, raw: bytes) -> str:
     """Save `raw` next to `path` under a name that is not taken yet."""
-    base = f"{path}.mcp-audit.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+    base = f"{path}.mcp-gradecard.bak-{time.strftime('%Y%m%d-%H%M%S')}"
     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
              | getattr(os, "O_BINARY", 0))
     for n in range(1000):
@@ -491,7 +491,7 @@ def _confirm_removal(count: int, files: int, yes: bool) -> str:
     if not interactive:
         return "refuse"
     sys.stderr.write(
-        f"[mcp-audit] Remove {count} server(s) from {files} file(s)? Each "
+        f"[mcp-gradecard] Remove {count} server(s) from {files} file(s)? Each "
         "file is backed up first. [y/N] ")
     sys.stderr.flush()
     try:
@@ -567,7 +567,7 @@ def _host_arg(text: str) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="mcp-audit",
+        prog="mcp-gradecard",
         description="Audit installed MCP servers: prompt-injection, "
                     "exfiltration endpoints, known-vulnerable versions, "
                     "floating pins, secret env vars.")
@@ -595,7 +595,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         "it launches starts in an empty temporary directory, "
                         "not the one you are in, and its program is looked "
                         "up on PATH only. A signal "
-                        "that ends mcp-audit meanwhile (Ctrl-C, SIGTERM, "
+                        "that ends mcp-gradecard meanwhile (Ctrl-C, SIGTERM, "
                         "SIGHUP) stops the servers first and exits 128 plus "
                         "its number, with no report.")
     p.add_argument("--probe-critical", action="store_true",
@@ -716,7 +716,7 @@ def _discard_output(stream) -> None:
 class _PipeSafe:
     """Stand-in for sys.stdout / sys.stderr while main() runs.
 
-    The reader of a pipe can quit at any moment (`mcp-audit
+    The reader of a pipe can quit at any moment (`mcp-gradecard
     | head -1`). Left alone, Python raises BrokenPipeError out of print()
     or, when the output was still buffered, prints "Exception ignored" at
     exit and replaces the exit code with 120 (see _IS_WINDOWS for how
@@ -781,7 +781,7 @@ def _closed_pipe_tolerant():
 
 def _origin(exc: BaseException) -> str:
     """Where an exception came from, as "file.py:123": the innermost frame
-    inside mcp_audit, else the innermost frame there is. Never its message,
+    inside mcp_gradecard, else the innermost frame there is. Never its message,
     which can quote the config that was being audited."""
     package = os.path.dirname(os.path.abspath(__file__)) + os.sep
     frames = []
@@ -799,12 +799,12 @@ def _crash(exc: Exception) -> int:
     means "findings" - named by its class and the line it came from, and
     never by its message or traceback (both can quote the config).
     MCP_AUDIT_DEBUG=1 prints the traceback as well, for whoever debugs
-    mcp-audit; the exit status is 2 either way."""
+    mcp-gradecard; the exit status is 2 either way."""
     debug = bool(os.environ.get("MCP_AUDIT_DEBUG"))
     if debug:
         sys.stderr.write("".join(traceback.format_exception(exc)))
     _note(f"error: internal error ({type(exc).__name__} at {_origin(exc)}). "
-          "This is a bug in mcp-audit, not a finding in your configs; no "
+          "This is a bug in mcp-gradecard, not a finding in your configs; no "
           "audit result was produced, so this run is not a clean bill of "
           "health."
           + ("" if debug else
@@ -837,7 +837,7 @@ def _interrupted(signum: int, servers: bool = False) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _harden_streams()
-    # `mcp-audit | head -1` must neither traceback nor change the exit code
+    # `mcp-gradecard | head -1` must neither traceback nor change the exit code
     # (the exit code is the verdict).
     with _closed_pipe_tolerant():
         try:

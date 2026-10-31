@@ -1,7 +1,7 @@
-"""A signal that ends mcp-audit during --deep ends the servers too (Round 2 #5).
+"""A signal that ends mcp-gradecard during --deep ends the servers too (Round 2 #5).
 
 The README says the server's whole process tree is killed "however the probe
-ends". SIGTERM and SIGHUP ended mcp-audit on the spot, with the servers it had
+ends". SIGTERM and SIGHUP ended mcp-gradecard on the spot, with the servers it had
 launched left running, and Ctrl-C ended it with a traceback. Now the signals
 that end the process stop the servers first, and the exit code is 128 plus the
 signal number, as a shell reports it.
@@ -19,8 +19,8 @@ import types
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import deep as deep_mod
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import deep as deep_mod
 
 from _support import FIX, isolated_machine, run_cli, write_json
 from test_deep_probe import alive, wait_dead
@@ -63,11 +63,11 @@ def _default_signals():
                      "signals are taken and by the README's note that the "
                      "taskkill path is unverified")
 class TestARealRun(unittest.TestCase):
-    """mcp-audit as a process, a server that never answers and has a child
+    """mcp-gradecard as a process, a server that never answers and has a child
     in its own process group: the usual shape of `npx` starting `node`."""
 
     def start(self, name="family_mcp_server.py"):
-        """mcp-audit with `name` as its server; (the process, (the server's
+        """mcp-gradecard with `name` as its server; (the process, (the server's
         pid, the pid of the process it started))."""
         tmp = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, True))
@@ -79,7 +79,7 @@ class TestARealRun(unittest.TestCase):
                if k != "PYTHONUNBUFFERED"}  # buffered, as a user has it
         env["MCP_AUDIT_HOME"] = tmp
         proc = subprocess.Popen(
-            [sys.executable, "-m", "mcp_audit", "--config", cfg, "--deep",
+            [sys.executable, "-m", "mcp_gradecard", "--config", cfg, "--deep",
              "--format", "json"], cwd=ROOT, env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, preexec_fn=_default_signals)
@@ -119,7 +119,7 @@ class TestARealRun(unittest.TestCase):
         self.assertIn(signal.Signals(signum).name, text)
         self.assertIn("no report", text)
         for pid in pids:
-            self.assertTrue(wait_dead(pid), "pid %d outlived mcp-audit" % pid)
+            self.assertTrue(wait_dead(pid), "pid %d outlived mcp-gradecard" % pid)
 
     def test_sigterm_stops_the_server_and_its_child(self):
         self.check(signal.SIGTERM)
@@ -130,7 +130,7 @@ class TestARealRun(unittest.TestCase):
     def test_ctrl_c_stops_them_too_and_prints_no_traceback(self):
         self.check(signal.SIGINT)
 
-    def test_an_escaped_grandchild_cannot_hold_mcp_audit_back(self):
+    def test_an_escaped_grandchild_cannot_hold_mcp_gradecard_back(self):
         # A process that left the session (setsid) keeps the server's output
         # pipe open. The README says it is not reached; it must not keep the
         # signal from ending the run either.
@@ -142,7 +142,7 @@ class TestARealRun(unittest.TestCase):
         self.assertEqual(proc.returncode, 128 + signal.SIGTERM, text)
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(out, b"")
-        self.assertTrue(wait_dead(server), "the server outlived mcp-audit")
+        self.assertTrue(wait_dead(server), "the server outlived mcp-gradecard")
 
     def test_a_deep_run_puts_the_handlers_back(self):
         before = {s: signal.getsignal(s) for s in (signal.SIGTERM,
@@ -228,7 +228,7 @@ class TestTheHandlers(unittest.TestCase):
 
     @unittest.skipUnless(POSIX, "needs SIGHUP")
     def test_a_signal_that_is_ignored_stays_ignored(self):
-        # `nohup mcp-audit --deep &`: SIGHUP is ignored on purpose
+        # `nohup mcp-gradecard --deep &`: SIGHUP is ignored on purpose
         old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
         try:
             with deep_mod.stop_on_signals():
@@ -464,7 +464,7 @@ class TestTheDocumentation(unittest.TestCase):
             readme = self.words(f.read())
         for needle in ("128 plus the signal number", "`130`, `143`, `129`",
                        "no report", "sigterm", "sighup", "ctrl-break",
-                       "`kill -9`", "nohup mcp-audit --deep &"):
+                       "`kill -9`", "nohup mcp-gradecard --deep &"):
             self.assertTrue(needle in readme, needle)
 
     def test_the_help_of_deep_says_it_too(self):

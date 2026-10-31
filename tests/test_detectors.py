@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import unittest
 
-from mcp_audit import detectors, discovery
+from mcp_gradecard import detectors, discovery
 
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
@@ -198,7 +198,7 @@ class TestStaticDetectors(unittest.TestCase):
             self.assertFalse(flagged(name), name)
 
     def test_nasty_server_scores_f(self):
-        from mcp_audit import scoring
+        from mcp_gradecard import scoring
         findings = detectors.audit_server("evil-pipe",
                                          self.nasty["evil-pipe"],
                                          self.advisories)
@@ -232,7 +232,7 @@ class TestAllowlist(unittest.TestCase):
 
 class TestWindowsCommands(unittest.TestCase):
     def _grade(self, cfg):
-        from mcp_audit import scoring
+        from mcp_gradecard import scoring
         return scoring.score(detectors.audit_server("x", cfg, []))[1]
 
     def test_windows_powershell_path_encoded(self):

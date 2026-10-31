@@ -16,7 +16,7 @@ import tempfile
 import unittest
 import unittest.mock
 
-from mcp_audit import deep as deep_mod
+from mcp_gradecard import deep as deep_mod
 
 from _support import FIX, isolated_machine, run_cli, write_json
 

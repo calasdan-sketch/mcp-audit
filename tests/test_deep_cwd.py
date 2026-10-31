@@ -1,6 +1,6 @@
 """--deep: where a server starts, and where its program comes from (Round 3 #1).
 
-`mcp-audit --deep` started every server in the directory it was run from, and
+`mcp-gradecard --deep` started every server in the directory it was run from, and
 found the program with shutil.which, which on Windows looks in the current
 directory first. Run inside a repository you have just cloned - the README's
 own "audit a clone" case - it ran the clone's files through your own servers:
@@ -22,8 +22,8 @@ import tempfile
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import deep as deep_mod
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import deep as deep_mod
 
 from _support import (isolated_machine, private_tempdir, run_cli, write_json,
                       write_text)
@@ -55,7 +55,7 @@ def plant_clone(clone):
 
 
 class TestTheStartDirectory(unittest.TestCase):
-    def test_it_is_an_empty_directory_not_the_one_mcp_audit_was_run_from(self):
+    def test_it_is_an_empty_directory_not_the_one_mcp_gradecard_was_run_from(self):
         with isolated_machine(chdir=True) as (home, clone), private_tempdir():
             plant_clone(clone)
             before = sorted(os.listdir(clone))
@@ -139,7 +139,7 @@ class TestTheStartDirectory(unittest.TestCase):
 
 
 class TestInsideAClone(unittest.TestCase):
-    """The README's "audit a clone": mcp-audit is run in a repository that is
+    """The README's "audit a clone": mcp-gradecard is run in a repository that is
     not yours, and the servers are the ones in your own files."""
 
     def setUp(self):
@@ -436,7 +436,7 @@ class TestProgram(unittest.TestCase):
                                             windows=True))
 
     def test_a_bare_name_is_not_taken_from_the_current_directory_either(self):
-        # PATH names the clone mcp-audit was run in, by its full path
+        # PATH names the clone mcp-gradecard was run in, by its full path
         with isolated_machine(chdir=True) as (home, cwd):
             write_text(os.path.join(cwd, "tool.EXE"), "")
             mine = os.path.join(self.bin, "tool.EXE")

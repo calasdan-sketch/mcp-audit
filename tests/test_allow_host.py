@@ -15,8 +15,8 @@ import os
 import sys
 import unittest
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import detectors
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import detectors
 
 from _support import FIX, isolated_machine, run_all_formats, run_cli, write_json
 

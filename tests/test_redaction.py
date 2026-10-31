@@ -1,4 +1,4 @@
-"""mcp-audit must never print a secret it was given (finding M3).
+"""mcp-gradecard must never print a secret it was given (finding M3).
 
 The exfiltration findings used to quote the whole URL: the password in
 `https://user:pw@host/`, a `?token=` query, a webhook path - in the human
@@ -11,8 +11,8 @@ import os
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import detectors, redact
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import detectors, redact
 
 from _support import isolated_machine, run_all_formats, run_cli, write_json
 

@@ -3,7 +3,7 @@
 Claude Code reads `managed-mcp.json` from one system path per OS
 (https://code.claude.com/docs/en/managed-mcp: macOS, Linux and WSL, Windows).
 It has the shape of a project's `.mcp.json`. The README said that its
-location was not known, and mcp-audit never looked: the servers an
+location was not known, and mcp-gradecard never looked: the servers an
 organization puts on a machine were the one set not audited.
 """
 
@@ -12,8 +12,8 @@ import os
 import unittest
 import unittest.mock
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import discovery
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import discovery
 
 from _support import isolated_machine, run_all_formats, run_cli, write_json
 

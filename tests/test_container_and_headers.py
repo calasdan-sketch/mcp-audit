@@ -7,7 +7,7 @@ configs through the CLI (SOP review 2026-10-31): `docker run --privileged -v
 import json
 import unittest
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 SECRET = "sk-abcdefghijklmnopqrstuvwxyz0123456789"
 

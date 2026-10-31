@@ -5,7 +5,7 @@ to announce itself only after the report; to read a server's output into
 memory without a limit (4 GB in 9 seconds); to stay alive for as long as a
 grandchild that had left the process group held the pipe (the probe limit was
 15 s, the process lived 45 s); to leave a server's children running; and to
-hand every server the whole environment of the shell that ran mcp-audit.
+hand every server the whole environment of the shell that ran mcp-gradecard.
 """
 
 import contextlib
@@ -23,9 +23,9 @@ import unittest
 import unittest.mock
 import warnings
 
-from mcp_audit import cli as cli_mod
-from mcp_audit import deep as deep_mod
-from mcp_audit import discovery
+from mcp_gradecard import cli as cli_mod
+from mcp_gradecard import deep as deep_mod
+from mcp_gradecard import discovery
 
 from _support import FIX, isolated_machine, run_all_formats, run_cli, write_json
 

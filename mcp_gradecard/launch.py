@@ -11,7 +11,7 @@ never printed. What is printed has a fixed shape that cannot carry one:
   s.js` runs node);
 * the package an npx/uvx-style launcher fetches (`some-server@1.2.3`), the
   script it starts (`server.js`) or the module (`-m mcp_server_fetch`), when
-  it is plainly one (after an option that mcp-audit does not know, the word
+  it is plainly one (after an option that mcp-gradecard does not know, the word
   that looks like the package could be the option's value: the line says
   `(package not shown)` instead);
 * how many arguments were left out;
@@ -92,7 +92,7 @@ def _target(program: str, args: "list[str]"
             ) -> "tuple[str, list[str]] | None":
     """(what to show, the arguments it is made of) for the package, module or
     script a launch starts, if it is plainly one. A package that follows an
-    option mcp-audit does not know could be that option's value, a credential
+    option mcp-gradecard does not know could be that option's value, a credential
     perhaps: it is not shown ("(package not shown)", made of no argument)."""
     unsure = False
     for package in detectors._packages_of(program, args):

@@ -2,7 +2,7 @@
 
 pyproject.toml declared no package data, so `pip install` produced a wheel
 without advisories.json; load_advisories() swallowed the OSError and returned
-[]: an installed mcp-audit graded `uvx mcp-server-fetch==2026.6.4`
+[]: an installed mcp-gradecard graded `uvx mcp-server-fetch==2026.6.4`
 100/100 where a checkout said 90/100 "known vulnerable". Nothing said so.
 """
 
@@ -17,7 +17,7 @@ import unittest
 import unittest.mock
 import zipfile
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 from _support import isolated_machine, run_all_formats, write_json
 
@@ -39,7 +39,7 @@ class TestFeedLoading(unittest.TestCase):
 
     def test_a_missing_feed_is_an_error_not_an_empty_list(self):
         for exc in (FileNotFoundError("gone"), PermissionError("denied"),
-                    ModuleNotFoundError("mcp_audit")):
+                    ModuleNotFoundError("mcp_gradecard")):
             with unittest.mock.patch.object(detectors, "_read_feed_text",
                                             side_effect=exc):
                 with self.assertRaises(detectors.AdvisoryFeedError) as cm:
@@ -94,12 +94,12 @@ class TestPackagingMetadata(unittest.TestCase):
         self.assertIn("advisories.json", m.group(1))
 
     def test_manifest_includes_the_feed_for_sdists(self):
-        self.assertIn("mcp_audit/advisories.json", read("MANIFEST.in"))
+        self.assertIn("mcp_gradecard/advisories.json", read("MANIFEST.in"))
 
     def test_version_is_the_same_in_pyproject_and_package(self):
-        import mcp_audit
+        import mcp_gradecard
         m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', read("pyproject.toml"))
-        self.assertEqual(mcp_audit.__version__, m.group(1))
+        self.assertEqual(mcp_gradecard.__version__, m.group(1))
 
 
 def _pip_wheel(src, out, env):
@@ -124,7 +124,7 @@ class TestBuiltWheel(unittest.TestCase):
         cls.env = env
         # Is wheel building usable at all in this interpreter? Prove it on a
         # trivial project first, so only a broken toolchain skips the test -
-        # never a broken mcp-audit.
+        # never a broken mcp-gradecard.
         toy = os.path.join(cls.tmp, "toy")
         os.makedirs(os.path.join(toy, "toypkg"))
         with open(os.path.join(toy, "pyproject.toml"), "w") as f:
@@ -143,6 +143,9 @@ class TestBuiltWheel(unittest.TestCase):
         os.makedirs(src)
         for name in ("pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"):
             shutil.copy(os.path.join(ROOT, name), src)
+        shutil.copytree(os.path.join(ROOT, "mcp_gradecard"),
+                        os.path.join(src, "mcp_gradecard"),
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copytree(os.path.join(ROOT, "mcp_audit"),
                         os.path.join(src, "mcp_audit"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -150,7 +153,7 @@ class TestBuiltWheel(unittest.TestCase):
         p = _pip_wheel(src, out, env)
         if p.returncode != 0:
             raise AssertionError(
-                "mcp-audit itself does not build into a wheel:\n"
+                "mcp-gradecard itself does not build into a wheel:\n"
                 + p.stdout.decode("utf-8", "replace")[-2000:]
                 + p.stderr.decode("utf-8", "replace")[-2000:])
         (cls.wheel,) = [os.path.join(out, n) for n in os.listdir(out)
@@ -168,24 +171,24 @@ class TestBuiltWheel(unittest.TestCase):
                               env=env, capture_output=True, timeout=120, **kw)
 
     def test_the_wheel_contains_the_feed_and_every_module(self):
-        self.assertIn("mcp_audit/advisories.json", self.names)
-        for fn in os.listdir(os.path.join(ROOT, "mcp_audit")):
+        self.assertIn("mcp_gradecard/advisories.json", self.names)
+        for fn in os.listdir(os.path.join(ROOT, "mcp_gradecard")):
             if fn.endswith(".py"):
-                self.assertIn("mcp_audit/" + fn, self.names)
+                self.assertIn("mcp_gradecard/" + fn, self.names)
 
     def test_the_installed_copy_finds_its_feed(self):
         p = self._python("-c", (
-            "import mcp_audit, os\n"
-            "from mcp_audit import detectors\n"
-            "assert os.path.realpath(mcp_audit.__file__).startswith("
-            "os.path.realpath(%r)), mcp_audit.__file__\n"
+            "import mcp_gradecard, os\n"
+            "from mcp_gradecard import detectors\n"
+            "assert os.path.realpath(mcp_gradecard.__file__).startswith("
+            "os.path.realpath(%r)), mcp_gradecard.__file__\n"
             "print(len(detectors.load_advisories()))\n") % self.installed)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertGreaterEqual(int(p.stdout.strip()), 1)
 
     def test_installed_and_checkout_agree_on_the_known_vulnerable_package(self):
         cfg = write_json(os.path.join(self.elsewhere, "fetch.json"), FETCH)
-        p = self._python("-m", "mcp_audit", "--config", cfg, "--format",
+        p = self._python("-m", "mcp_gradecard", "--config", cfg, "--format",
                          "json")
         self.assertEqual(p.returncode, 0, p.stderr)
         (res,) = json.loads(p.stdout)["results"]

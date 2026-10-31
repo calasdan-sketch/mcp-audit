@@ -17,7 +17,7 @@ import time
 import unittest
 import unittest.mock
 
-from mcp_audit import detectors
+from mcp_gradecard import detectors
 
 from _support import isolated_machine, run_all_formats, write_json
 

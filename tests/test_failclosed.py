@@ -11,7 +11,7 @@ import os
 import unittest
 import unittest.mock
 
-from mcp_audit import detectors, scoring
+from mcp_gradecard import detectors, scoring
 
 from _support import isolated_machine, run_cli, run_all_formats, write_json
 

@@ -12,7 +12,7 @@ import os
 import unittest
 import unittest.mock
 
-from mcp_audit import discovery
+from mcp_gradecard import discovery
 
 from _support import (client_path, isolated_machine, run_cli, write_json)
 

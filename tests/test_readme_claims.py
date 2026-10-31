@@ -11,7 +11,7 @@ import re
 import tempfile
 import unittest
 
-from mcp_audit import __version__, cli, scoring
+from mcp_gradecard import __version__, cli, scoring
 
 from _support import isolated_machine, run_cli, write_json
 
@@ -30,7 +30,7 @@ class TestEveryCheckIsDocumented(unittest.TestCase):
 
     def test_each_check_id_the_code_makes_has_a_row_in_the_table(self):
         ids = {scoring.DESCRIPTION_CHECK}
-        for path in glob.glob(os.path.join(ROOT, "mcp_audit", "*.py")):
+        for path in glob.glob(os.path.join(ROOT, "mcp_gradecard", "*.py")):
             with open(path, encoding="utf-8") as f:
                 source = f.read()
             ids.update(m.group(1) for rx in (self.CALL, self.DICT)
@@ -49,8 +49,8 @@ class TestTheVersionFlag(unittest.TestCase):
                 self.assertRaises(SystemExit) as stop:
             cli.main(["--version"])
         self.assertEqual(stop.exception.code, 0)
-        self.assertEqual(out.getvalue().strip(), "mcp-audit " + __version__)
-        self.assertIn("python3 -m mcp_audit --version", readme())
+        self.assertEqual(out.getvalue().strip(), "mcp-gradecard " + __version__)
+        self.assertIn("python3 -m mcp_gradecard --version", readme())
 
 
 class TestWhatExitStatusZeroMeans(unittest.TestCase):

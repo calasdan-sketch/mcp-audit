@@ -16,7 +16,7 @@ import unicodedata
 import unittest
 import unittest.mock
 
-from mcp_audit import discovery, jsonc, redact, scoring
+from mcp_gradecard import discovery, jsonc, redact, scoring
 
 from _support import (client_path, isolated_machine, run_all_formats, run_cli,
                       write_bytes, write_json, write_text)
@@ -544,7 +544,7 @@ class TestNothingEscapesAsATraceback(unittest.TestCase):
             with unittest.mock.patch.dict(os.environ, debug):
                 code, out, err = self.crash(RuntimeError("x"))
             self.assertEqual(code, 2, debug)
-            self.assertIn("bug in mcp-audit", err)
+            self.assertIn("bug in mcp-gradecard", err)
 
     def test_a_deliberate_exit_still_exits_that_way(self):
         with self.assertRaises(SystemExit) as cm:

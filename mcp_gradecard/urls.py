@@ -1,6 +1,6 @@
 r"""Where does a URL point? One answer that does not depend on the parser.
 
-mcp-audit decides whether an endpoint in a config is the local machine or a
+mcp-gradecard decides whether an endpoint in a config is the local machine or a
 host it trusts. Python's urllib and the parsers MCP servers are written with
 (the WHATWG URL standard: Node's `new URL`, Deno, Bun, browsers) read some
 strings differently, so an allowlist that believed only urllib could be walked
